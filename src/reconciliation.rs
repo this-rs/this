@@ -154,7 +154,8 @@ fn lire_chaine(o: &[u8], pos: &mut usize) -> Result<String, DecodageEnregistreme
         .get(*pos..fin)
         .ok_or_else(|| DecodageEnregistrement::Malforme("troncature chaîne".into()))?;
     *pos = fin;
-    String::from_utf8(t.to_vec()).map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
+    String::from_utf8(t.to_vec())
+        .map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
 }
 
 impl EnregistrementOriginal {
@@ -221,6 +222,16 @@ impl EnregistrementOriginal {
         let autorite_consommateur = lire_u64_le(octets, &mut pos)?;
         let cible = NodeId(lire_u64_le(octets, &mut pos)?);
         let n = lire_u32_le(octets, &mut pos)? as usize;
+        // Borne AVANT toute allocation : chaque effet occupe au moins 12 octets
+        // (longueur de clé u32 + clé vide + valeur i64). Sans cette borne, un
+        // `n_effets` de 2^32-1 est SYNTAXIQUEMENT valide et fait réserver 128 Gio
+        // — un refus nommé devient un abandon du processus. Mesuré.
+        let reste = octets.len() - pos;
+        if n > reste / 12 {
+            return Err(DecodageEnregistrement::Malforme(format!(
+                "n_effets={n} dépasse les {reste} octets disponibles"
+            )));
+        }
         let mut effets_attendus = Vec::with_capacity(n);
         for _ in 0..n {
             let cle = lire_chaine(octets, &mut pos)?;
@@ -237,7 +248,9 @@ impl EnregistrementOriginal {
             .to_vec();
         pos = fin;
         if pos != octets.len() {
-            return Err(DecodageEnregistrement::Malforme("octets excédentaires".into()));
+            return Err(DecodageEnregistrement::Malforme(
+                "octets excédentaires".into(),
+            ));
         }
         Ok(EnregistrementOriginal {
             version,
@@ -266,7 +279,11 @@ pub fn reconcilier(
     store: &SubstrateStore,
 ) -> VerdictReconciliation {
     // 1. Complétude des effets (L1).
-    let attendus: Vec<&str> = enr.effets_attendus.iter().map(|(k, _)| k.as_str()).collect();
+    let attendus: Vec<&str> = enr
+        .effets_attendus
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
     if reference.effets() != attendus.as_slice() {
         return VerdictReconciliation::Incomplet;
     }
@@ -290,9 +307,10 @@ pub fn reconcilier(
         IntegriteTentative::Indeterminee => VerdictReconciliation::Indetermine,
         IntegriteTentative::Partielle => VerdictReconciliation::Partielle,
         IntegriteTentative::Integrale => {
-            let tous_canoniques = res.par_cle.iter().all(|e| {
-                e.estampille_courante == Some((enr.backend, reference.horloge()))
-            });
+            let tous_canoniques = res
+                .par_cle
+                .iter()
+                .all(|e| e.estampille_courante == Some((enr.backend, reference.horloge())));
             // Contenu à TROIS états : conforme / incompatible (valeur relue ≠ attendue)
             // / illisible (lecture absente ou en erreur — PAS une preuve d'incompatibilité).
             let mut incompatible = false;
@@ -319,8 +337,461 @@ pub fn reconcilier(
 }
 
 fn lire_i64(store: &SubstrateStore, id: NodeId, cle: &str) -> Option<i64> {
-    store.get_node_property(id, &PropertyKey::new(cle)).and_then(|v| match v {
-        Value::Int64(n) => Some(n),
-        _ => None,
+    store
+        .get_node_property(id, &PropertyKey::new(cle))
+        .and_then(|v| match v {
+            Value::Int64(n) => Some(n),
+            _ => None,
+        })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Durabilité du record : écriture atomique + qualification d'admissibilité
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Ce que ce bloc ÉTABLIT, et ce qu'il n'établit PAS :
+//
+// - ATOMICITÉ (par construction, mesurable) : les octets vont dans un temporaire
+//   du MÊME répertoire, puis `rename`. Un lecteur voit l'ancien record ou le
+//   nouveau, jamais un entre-deux. Un écrivain tué laisse au pire un
+//   `<record>.tmp.*` orphelin — jamais un record tronqué.
+// - DURABILITÉ POSIX (par l'ORDRE des opérations) : les octets sont `fsync`és
+//   AVANT le rename, et l'entrée de répertoire APRÈS. Sans le premier, le rename
+//   peut précéder les données ; sans le second, le rename lui-même peut être
+//   perdu. L'ordre est OBSERVABLE (`ecrire_durable_observe`), donc vérifié, pas
+//   seulement affirmé.
+// - NON ÉTABLIE : la survie à une coupure d'alimentation. `fsync` en est la
+//   condition nécessaire ; la preuve exigerait une panne matérielle réelle.
+//
+// Rien ici ne fabrique d'autorité : `autorite_consommateur` et `decision_id`
+// n'existent PAS dans le format V1, et la lecture d'un V1 rend une vue V1 —
+// jamais un `EnregistrementOriginal` complété par des zéros.
+
+use std::path::{Path, PathBuf};
+
+/// Les étapes observables d'une écriture durable, dans l'ORDRE où elles doivent
+/// se produire. L'observateur sert à MESURER l'ordre (test) ; il ne le décide pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtapeEcriture {
+    TemporaireCree,
+    OctetsEcrits,
+    FichierSynchronise,
+    Renomme,
+    RepertoireSynchronise,
+}
+
+fn horloge_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Nom du temporaire : MÊME répertoire que la cible (sinon `rename` traverserait
+/// un système de fichiers et perdrait son atomicité), unique par processus + temps.
+pub fn nom_temporaire(chemin: &Path) -> PathBuf {
+    let mut nom = chemin.as_os_str().to_os_string();
+    nom.push(format!(".tmp.{}.{}", std::process::id(), horloge_nanos()));
+    PathBuf::from(nom)
+}
+
+/// Écriture atomique ET durable : temporaire → octets → `fsync` fichier →
+/// `rename` → `fsync` répertoire. En cas d'échec avant le rename, le temporaire
+/// est retiré : aucun résidu n'est laissé par une écriture qui a échoué.
+pub fn ecrire_durable(chemin: &Path, octets: &[u8]) -> std::io::Result<()> {
+    ecrire_durable_observe(chemin, octets, &mut |_| {})
+}
+
+/// Même chemin de code que [`ecrire_durable`], avec l'ORDRE des étapes exposé.
+/// Il n'existe pas de seconde implémentation : l'observation ne change rien à ce
+/// qui est exécuté.
+pub fn ecrire_durable_observe(
+    chemin: &Path,
+    octets: &[u8],
+    observe: &mut dyn FnMut(EtapeEcriture),
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let dossier = chemin.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "chemin sans répertoire parent",
+        )
+    })?;
+    let tmp = nom_temporaire(chemin);
+    let resultat = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        observe(EtapeEcriture::TemporaireCree);
+        f.write_all(octets)?;
+        observe(EtapeEcriture::OctetsEcrits);
+        // Les OCTETS avant le rename : c'est l'ordre qui rend l'échange sûr.
+        f.sync_all()?;
+        observe(EtapeEcriture::FichierSynchronise);
+        drop(f);
+        std::fs::rename(&tmp, chemin)?;
+        observe(EtapeEcriture::Renomme);
+        // Le NOM du fichier après le rename : sans cela l'entrée de répertoire
+        // peut être perdue, et le record avec elle.
+        std::fs::File::open(dossier)?.sync_all()?;
+        observe(EtapeEcriture::RepertoireSynchronise);
+        Ok(())
+    })();
+    if resultat.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    resultat
+}
+
+/// Les temporaires ORPHELINS d'un écrivain mort : `<record>.tmp.*`. Le record
+/// publié n'est jamais touché. Un temporaire n'est pas un record : il n'est ni
+/// lu, ni interprété, ni promu — seulement constaté.
+pub fn temporaires_orphelins(chemin: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let dossier = match chemin.parent() {
+        Some(d) => d,
+        None => return Ok(Vec::new()),
+    };
+    let Some(nom) = chemin.file_name().and_then(|n| n.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let prefixe = format!("{nom}.tmp.");
+    let mut orphelins = Vec::new();
+    for entree in std::fs::read_dir(dossier)? {
+        let entree = entree?;
+        if entree.file_name().to_string_lossy().starts_with(&prefixe) {
+            orphelins.push(entree.path());
+        }
+    }
+    orphelins.sort();
+    Ok(orphelins)
+}
+
+/// Empreinte SHA-256 en hexadécimal — sert à PROUVER qu'une relecture n'a pas
+/// modifié les octets (provenance), jamais à identifier une opération (ce n'est
+/// pas K, et ce n'est pas une signature).
+pub fn empreinte_sha256(octets: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(octets);
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
+}
+
+/// D'où viennent les octets, et à quoi ils correspondent exactement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// Chemin du fichier, ou `"<mémoire>"` pour des octets fournis directement.
+    pub source: String,
+    pub longueur: usize,
+    pub empreinte_sha256: String,
+}
+
+impl Provenance {
+    pub fn de(octets: &[u8], source: &str) -> Self {
+        Provenance {
+            source: source.to_string(),
+            longueur: octets.len(),
+            empreinte_sha256: empreinte_sha256(octets),
+        }
+    }
+}
+
+/// La vue V1 d'un record : EXACTEMENT les champs que le format V1 portait.
+/// Ni `decision_id`, ni `autorite_consommateur` — ils n'existaient pas. Les
+/// compléter par 0 serait fabriquer une autorité : ce type rend cela impossible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnregistrementV1 {
+    pub version: u32,
+    pub k: String,
+    pub backend: u64,
+    pub generation: u64,
+    pub cible: NodeId,
+    pub effets_attendus: Vec<(String, i64)>,
+    pub reference_bytes: Vec<u8>,
+}
+
+/// Pourquoi un record est inexploitable comme record COURANT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MotifIllisibilite {
+    /// Magic invalide, troncature, clé non UTF-8, octets excédentaires.
+    Malforme(String),
+    /// Version qui n'est ni la courante, ni une version legacy connue.
+    VersionInconnue(u32),
+    /// Décodable octet par octet, mais INADMISSIBLE : K vide, génération 0,
+    /// autorité consommateur jamais émise. Le codec ne peut pas le voir ; la
+    /// qualification si. C'est la corruption la plus dangereuse, parce qu'elle
+    /// passe toutes les vérifications de forme.
+    CorruptionSyntactique(String),
+}
+
+/// Octets conservés VERBATIM + provenance, avec le motif du refus. Jamais
+/// supprimés, jamais « réparés », jamais réécrits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordIllisible {
+    pub octets: Vec<u8>,
+    pub provenance: Provenance,
+    pub motif: MotifIllisibilite,
+}
+
+/// Un record V1 : il peut représenter une tentative ENGAGÉE ou INDÉTERMINÉE.
+/// Il est mis en quarantaine EXPLICITE — refusé comme record courant, conservé
+/// comme obligation. Sa résolution est possible auprès du backend, mais elle ne
+/// produit jamais `Confirme` : K, la décision et l'autorité consommateur ne sont
+/// pas attestables dans ce format, et on ne les invente pas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordLegacy {
+    pub version: u32,
+    pub octets: Vec<u8>,
+    pub provenance: Provenance,
+    /// Vue V1 si les octets sont un V1 bien formé. `None` = V1 illisible :
+    /// le record reste conservé, sa lecture est refusée nommément.
+    pub vue: Option<EnregistrementV1>,
+}
+
+/// L'état d'un record tel qu'il doit être MANIPULÉ : jamais « décodé ou rien ».
+#[derive(Debug, Clone, PartialEq)]
+pub enum EtatEnregistrement {
+    /// Record courant, admissible : la chaîne d'autorité est complète.
+    Courant(EnregistrementOriginal),
+    /// Record V1 : quarantaine legacy, obligation préservée.
+    QuarantaineLegacy(RecordLegacy),
+    /// Octets illisibles ou inadmissibles : conservés, refusés, nommés.
+    QuarantaineIllisible(RecordIllisible),
+}
+
+impl EtatEnregistrement {
+    /// Les octets tels qu'ils étaient — dans TOUS les cas, y compris le refus.
+    /// C'est la garantie qu'un refus ne fait pas disparaître le record.
+    pub fn octets_preserves(&self) -> &[u8] {
+        match self {
+            EtatEnregistrement::Courant(_) => &[], // reconstruit, pas conservé : voir `encoder`
+            EtatEnregistrement::QuarantaineLegacy(r) => &r.octets,
+            EtatEnregistrement::QuarantaineIllisible(r) => &r.octets,
+        }
+    }
+
+    /// Un record est EXPLOITABLE comme chaîne d'autorité complète seulement s'il
+    /// est courant. Tout le reste exige une décision explicite du consommateur.
+    pub fn est_courant(&self) -> bool {
+        matches!(self, EtatEnregistrement::Courant(_))
+    }
+
+    /// Le refus est-il NOMMÉ (et non une absence) ?
+    pub fn refus(&self) -> Option<&MotifIllisibilite> {
+        match self {
+            EtatEnregistrement::QuarantaineIllisible(r) => Some(&r.motif),
+            _ => None,
+        }
+    }
+}
+
+/// Version legacy connue en lecture seule.
+pub const ENREGISTREMENT_VERSION_LEGACY: u32 = 1;
+
+/// Décode un record au format V1 (l'ANCIEN codec). Sert à deux choses :
+/// relire un V1 mis en quarantaine, et exercer la lecture croisée — un lecteur
+/// V1 qui reçoit un record V2 le REFUSE (`VersionInconnue(2)`) au lieu de le
+/// mal interpréter. Sans ce refus, les octets V2 se liraient comme un V1 décalé.
+pub fn decoder_v1(octets: &[u8]) -> Result<EnregistrementV1, DecodageEnregistrement> {
+    if octets.len() < 4 {
+        return Err(DecodageEnregistrement::Malforme("trop court".into()));
+    }
+    if octets[..4] != ENREGISTREMENT_MAGIC {
+        return Err(DecodageEnregistrement::Malforme("magic invalide".into()));
+    }
+    let mut pos = 4usize;
+    let version = lire_u32_le(octets, &mut pos)?;
+    if version != ENREGISTREMENT_VERSION_LEGACY {
+        return Err(DecodageEnregistrement::VersionInconnue(version));
+    }
+    let k = lire_chaine(octets, &mut pos)?;
+    let backend = lire_u64_le(octets, &mut pos)?;
+    let generation = lire_u64_le(octets, &mut pos)?;
+    let cible = NodeId(lire_u64_le(octets, &mut pos)?);
+    let n = lire_u32_le(octets, &mut pos)? as usize;
+    let reste = octets.len() - pos;
+    if n > reste / 12 {
+        return Err(DecodageEnregistrement::Malforme(format!(
+            "n_effets={n} dépasse les {reste} octets disponibles"
+        )));
+    }
+    let mut effets_attendus = Vec::with_capacity(n);
+    for _ in 0..n {
+        let cle = lire_chaine(octets, &mut pos)?;
+        let val = lire_u64_le(octets, &mut pos)? as i64;
+        effets_attendus.push((cle, val));
+    }
+    let ref_len = lire_u64_le(octets, &mut pos)? as usize;
+    let fin = pos
+        .checked_add(ref_len)
+        .ok_or_else(|| DecodageEnregistrement::Malforme("troncature référence".into()))?;
+    let reference_bytes = octets
+        .get(pos..fin)
+        .ok_or_else(|| DecodageEnregistrement::Malforme("troncature référence".into()))?
+        .to_vec();
+    pos = fin;
+    if pos != octets.len() {
+        return Err(DecodageEnregistrement::Malforme(
+            "octets excédentaires".into(),
+        ));
+    }
+    Ok(EnregistrementV1 {
+        version,
+        k,
+        backend,
+        generation,
+        cible,
+        effets_attendus,
+        reference_bytes,
     })
+}
+
+impl EnregistrementOriginal {
+    /// Admissibilité SÉMANTIQUE d'un record décodé. Le codec ne peut pas la
+    /// trancher : `k` vide, `generation` 0 et `autorite_consommateur` 0 sont
+    /// des octets parfaitement valides.
+    ///
+    /// `generation == 0` et `autorite_consommateur == 0` sont refusés parce que
+    /// la primitive ne les émet JAMAIS : `Attribution::reserver` incrémente
+    /// depuis 0, donc la première génération est 1, et `PROCHAINE_AUTORITE` part
+    /// de 1. Une telle valeur n'a pas été produite par une réservation : elle a
+    /// été fabriquée.
+    pub fn admissibilite(&self) -> Result<(), MotifIllisibilite> {
+        if self.k.is_empty() {
+            return Err(MotifIllisibilite::CorruptionSyntactique(
+                "K vide : identité logique absente".into(),
+            ));
+        }
+        if self.k.trim().is_empty() {
+            return Err(MotifIllisibilite::CorruptionSyntactique(
+                "K blanc : identité logique non signifiante".into(),
+            ));
+        }
+        if self.generation == 0 {
+            return Err(MotifIllisibilite::CorruptionSyntactique(
+                "génération 0 : jamais émise par une réservation".into(),
+            ));
+        }
+        if self.autorite_consommateur == 0 {
+            return Err(MotifIllisibilite::CorruptionSyntactique(
+                "autorité consommateur 0 : jamais émise par une instance".into(),
+            ));
+        }
+        if self.version != ENREGISTREMENT_VERSION {
+            return Err(MotifIllisibilite::VersionInconnue(self.version));
+        }
+        Ok(())
+    }
+}
+
+/// Classe des octets de record — la SEULE entrée qui ne perd rien :
+/// courant, quarantaine legacy, ou refus nommé avec octets + provenance.
+pub fn qualifier(octets: &[u8], source: &str) -> EtatEnregistrement {
+    let provenance = Provenance::de(octets, source);
+    // 8 octets au minimum : le magic ET la version doivent être lisibles.
+    if octets.len() < 8 {
+        return EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+            octets: octets.to_vec(),
+            provenance,
+            motif: MotifIllisibilite::Malforme(format!(
+                "trop court : {} octets pour un en-tête de 8",
+                octets.len()
+            )),
+        });
+    }
+    if octets[..4] != ENREGISTREMENT_MAGIC {
+        return EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+            octets: octets.to_vec(),
+            provenance,
+            motif: MotifIllisibilite::Malforme("magic invalide".into()),
+        });
+    }
+    let version = u32::from_le_bytes([octets[4], octets[5], octets[6], octets[7]]);
+    match version {
+        ENREGISTREMENT_VERSION => match EnregistrementOriginal::decoder(octets) {
+            Ok(enr) => match enr.admissibilite() {
+                Ok(()) => EtatEnregistrement::Courant(enr),
+                Err(motif) => EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+                    octets: octets.to_vec(),
+                    provenance,
+                    motif,
+                }),
+            },
+            Err(DecodageEnregistrement::Malforme(raison)) => {
+                EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+                    octets: octets.to_vec(),
+                    provenance,
+                    motif: MotifIllisibilite::Malforme(raison),
+                })
+            }
+            Err(DecodageEnregistrement::VersionInconnue(v)) => {
+                EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+                    octets: octets.to_vec(),
+                    provenance,
+                    motif: MotifIllisibilite::VersionInconnue(v),
+                })
+            }
+        },
+        ENREGISTREMENT_VERSION_LEGACY => {
+            // V1 : on CONSERVE toujours les octets. La vue n'est qu'un confort
+            // de lecture ; son absence ne fait pas disparaître le record.
+            let vue = decoder_v1(octets).ok();
+            EtatEnregistrement::QuarantaineLegacy(RecordLegacy {
+                version,
+                octets: octets.to_vec(),
+                provenance,
+                vue,
+            })
+        }
+        autre => EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+            octets: octets.to_vec(),
+            provenance,
+            motif: MotifIllisibilite::VersionInconnue(autre),
+        }),
+    }
+}
+
+/// Relit un record depuis le médium et le QUALIFIE. L'octet est la seule source :
+/// aucun état RAM n'intervient, donc la qualification est reproductible dans un
+/// autre processus.
+pub fn relire_qualifie(chemin: &Path) -> std::io::Result<EtatEnregistrement> {
+    let octets = std::fs::read(chemin)?;
+    Ok(qualifier(&octets, &chemin.to_string_lossy()))
+}
+
+/// Ce qu'un record V1 permet d'établir auprès du backend — et rien de plus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionLegacy {
+    /// Les effets attendus sont retrouvés ENGAGÉS dans le backend. L'identité
+    /// logique (K/G) de l'opération n'est PAS attestée par ce format.
+    EffetEngageIdentiteNonAttestee,
+    /// Au moins un effet retrouvé, au moins un non retrouvé.
+    EffetPartielIdentiteNonAttestee,
+    /// Aucun effet retrouvé. JAMAIS « absence définitive » : l'absence d'effet
+    /// constatée aujourd'hui ne prouve pas qu'aucune tentative n'a été engagée.
+    EffetNonRetrouveJamaisAbsenceDefinitive,
+}
+
+impl RecordLegacy {
+    /// Résout l'OBLIGATION d'un record V1 auprès du backend, sans jamais
+    /// fabriquer l'autorité qui manque. La référence (E) est dans les octets ;
+    /// on la relit, on interroge la base, et on rapporte ce que la base dit.
+    pub fn resoudre_obligation(&self, store: &SubstrateStore) -> Result<ResolutionLegacy, String> {
+        let vue = self
+            .vue
+            .as_ref()
+            .ok_or_else(|| "record V1 illisible : aucune obligation résoluble".to_string())?;
+        let reference = ReferenceTentative::from_bytes(&vue.reference_bytes)
+            .map_err(|e| format!("référence V1 illisible : {e}"))?;
+        let res = store
+            .resoudre_reference(&reference)
+            .map_err(|e| format!("résolution refusée par le backend : {e}"))?;
+        Ok(match res.integrite {
+            IntegriteTentative::Integrale => ResolutionLegacy::EffetEngageIdentiteNonAttestee,
+            IntegriteTentative::Partielle => ResolutionLegacy::EffetPartielIdentiteNonAttestee,
+            IntegriteTentative::Indeterminee => {
+                ResolutionLegacy::EffetNonRetrouveJamaisAbsenceDefinitive
+            }
+        })
+    }
 }
