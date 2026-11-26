@@ -92,18 +92,35 @@ fn corpus() -> Vec<(&'static str, [f32; 3])> {
 }
 
 /// Mémoire de prototypes en RAM : ce que ferait un `Learning` qui les tient dans Obrain.
-#[derive(Default)]
 struct MemoirePrototypes {
     prototypes: RwLock<Vec<Prototype>>,
     /// Les classes que le ROUTEUR a demandées à l'apprentissage.
     classes_vues: Mutex<Vec<String>>,
     /// Nombre de classifications rendues inconnues.
     inconnues: Mutex<usize>,
+    /// Quantification de la projection (1 = collision de v1/v2 orthogonaux).
+    quantification: u32,
+}
+
+impl Default for MemoirePrototypes {
+    fn default() -> Self {
+        Self {
+            prototypes: RwLock::new(Vec::new()),
+            classes_vues: Mutex::new(Vec::new()),
+            inconnues: Mutex::new(0),
+            quantification: 1000,
+        }
+    }
 }
 
 impl MemoirePrototypes {
     fn classer(&self, repr: &TaskRepr) -> Classification {
-        let c = classer(repr, &self.prototypes.read().unwrap(), 0.9, 1000);
+        let c = classer(
+            repr,
+            &self.prototypes.read().unwrap(),
+            0.9,
+            self.quantification,
+        );
         if let Some(f) = &c.formation {
             // L'autorité de persistance : enregistre la proposition avec une
             // identité logique UNIQUE (pas un hash de projection).
@@ -287,9 +304,16 @@ fn sans_representation_l_incertitude_est_dite_et_le_routeur_route_quand_meme() {
             honored: true,
         }));
         // Le routeur décide quand même : politique neutre, aucune exception.
+        let d = routed.decision.as_ref().unwrap();
         assert!(
             routed.decision.is_some(),
             "le routeur doit décider ({texte})"
+        );
+        // Sans identité cognitive, AUCUNE attribution : la décision ne porte pas
+        // de classe commune (pas `repr.unknown` comme clé d'apprentissage).
+        assert!(
+            d.cognitive_class.is_none(),
+            "sans connaissance constituée, pas d'attribution cognitive ({texte})"
         );
     }
 
@@ -544,5 +568,52 @@ fn la_representation_change_la_decision_a_capacites_identiques() {
     assert!(
         vues.iter().all(|c| c.starts_with("repr.")),
         "aucune catégorie lexicale ne doit atteindre arms() : {vues:?}"
+    );
+}
+
+#[test]
+fn deux_connaissances_distinctes_malgre_la_poignee_commune() {
+    // Quantification = 1 : les composantes 0.1 s'arrondissent à 0, v1 et v2
+    // (orthogonaux) partagent la même clé de projection.
+    let memoire = MemoirePrototypes {
+        quantification: 1,
+        ..Default::default()
+    };
+    let r1 = TaskRepr {
+        embedding: Some(vec![0.1f32, 0.0]),
+        ..Default::default()
+    };
+    let r2 = TaskRepr {
+        embedding: Some(vec![0.0f32, 0.1]),
+        ..Default::default()
+    };
+
+    // L'autorité enregistre deux identités DISTINCTES, pas un hash commun.
+    let id1 = memoire.classer(&r1).class.expect("identité 1");
+    let id2 = memoire.classer(&r2).class.expect("identité 2");
+    assert_ne!(id1, id2, "deux connaissances malgré la poignée commune");
+    assert_eq!(
+        memoire.prototypes.read().unwrap().len(),
+        2,
+        "exactement deux prototypes"
+    );
+
+    // Même clé de projection (collision d'indice), identités distinctes.
+    assert_eq!(
+        this_harness::cognition::poignee_de_projection(&[0.1, 0.0], 1),
+        this_harness::cognition::poignee_de_projection(&[0.0, 0.1], 1)
+    );
+
+    // Rappel : v1 → première identité, v2 → seconde.
+    assert_eq!(memoire.classer(&r1).class.as_ref(), Some(&id1));
+    assert_eq!(memoire.classer(&r2).class.as_ref(), Some(&id2));
+
+    // Rejeu : aucune formation supplémentaire.
+    memoire.classer(&r1);
+    memoire.classer(&r2);
+    assert_eq!(
+        memoire.prototypes.read().unwrap().len(),
+        2,
+        "rejeu sans formation supplémentaire"
     );
 }

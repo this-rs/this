@@ -862,7 +862,13 @@ impl TurnRouter {
         // La classe vient de la REPRÉSENTATION (vecteur + prototypes appris), jamais
         // du texte : aucun lexique n'est consulté ici.
         let repr = self.representation(turn.text, turn.has_images, &signature);
+        // `class` est l'identité cognitive constituée, ou `None` (inconnue /
+        // proposition non enregistrée). `arms_key` est la clé NEUTRE pour la
+        // lecture des bras — elle ne sert jamais à attribuer une observation.
         let class = self.learning.classify(&repr).await.class_key();
+        let arms_key = class
+            .clone()
+            .unwrap_or_else(|| crate::cognition::CLASSE_INCONNUE.to_string());
 
         let mut pool = self.current_pool().await;
         if let Some(entries) = &choice.pool {
@@ -909,7 +915,7 @@ impl TurnRouter {
         let may_move = rights.provider && (blind || !just_moved);
         // Juste après un changement, un tour de la même classe est stable.
         let held = held_turn.is_some_and(|t| t.checked_add(1) == Some(index))
-            && held_class.as_deref() == Some(class.as_str());
+            && held_class.as_deref() == class.as_deref();
 
         let mut settings = settings_for(&choice.routing, rights.auto);
         // Un pool est routé comme `full` à l'intérieur, quel que soit le mode des réglages.
@@ -917,10 +923,10 @@ impl TurnRouter {
             settings.mode = ProviderRoutingMode::Full;
         }
         let mut request = DecideRequest::new(signature, settings, pool);
-        // La classe cognitive issue de `classify` circule jusqu'au scoreur : le
-        // scoreur ne la recalcule pas depuis la signature (il lirait `chat.general`
-        // et écarterait les bras `repr.*`).
-        request.class = Some(class.clone());
+        // Le scoreur lit les bras par la clé NEUTRE (l'identité, sinon
+        // `repr.unknown`). L'identité cognitive, elle, est portée par la décision
+        // APRÈS coup (voir plus bas) : `None` = pas d'attribution.
+        request.class = Some(arms_key.clone());
         request.current = has_pair.then(|| current.clone());
         request.turn_index = Some(index);
         request.narrowed.extend(person);
@@ -938,7 +944,7 @@ impl TurnRouter {
             });
         }
 
-        let arms = self.learning.arms(&class).await;
+        let arms = self.learning.arms(&arms_key).await;
         let hints = self.learning.hints();
         let id = self.seeds.next_id();
         let mut decision = decide(id, &request, &arms, &hints);
@@ -1028,7 +1034,7 @@ impl TurnRouter {
                         state.provider = pick.provider_id.clone();
                         state.model = pick.model.clone();
                         state.last_change_turn = Some(index);
-                        state.last_change_class = Some(class.clone());
+                        state.last_change_class = class.clone();
                         if moves {
                             state.last_move_turn = Some(index);
                         }
@@ -1037,7 +1043,7 @@ impl TurnRouter {
                     state.open = Some(Open {
                         id: decision.id,
                         pick,
-                        class: class.clone(),
+                        class: arms_key.clone(),
                         before,
                         generation: state.generation,
                     });
@@ -1050,6 +1056,10 @@ impl TurnRouter {
                 decision.applied = apply
                     && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
                 decision.used = used;
+                // L'identité cognitive de l'attribution : `None` quand aucune
+                // connaissance n'est constituée (routage neutre, aucune observation
+                // n'est attribuée à une classe commune).
+                decision.cognitive_class = class.clone();
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed,
@@ -1236,7 +1246,11 @@ impl TurnRouter {
             Some(class) => class,
             None => {
                 let repr = self.representation(turn.text, turn.has_images, &signature);
-                self.learning.classify(&repr).await.class_key()
+                self.learning
+                    .classify(&repr)
+                    .await
+                    .class_key()
+                    .unwrap_or_else(|| crate::cognition::CLASSE_INCONNUE.to_string())
             }
         };
 

@@ -187,15 +187,12 @@ impl Classification {
         }
     }
 
-    /// La clé de classe effective : la connaissance reconnue, sinon la classe
-    /// neutre d'incertitude (`repr.unknown`). Une formation non enregistrée n'a
-    /// pas d'identité : elle ne sert pas de clé d'apprentissage tant que
-    /// l'autorité de persistance ne l'a pas constituée.
-    pub fn class_key(&self) -> String {
-        self.class
-            .as_ref()
-            .map(|c| c.0.clone())
-            .unwrap_or_else(|| CLASSE_INCONNUE.to_string())
+    /// L'identité cognitive constituée, si elle existe. `None` : connaissance
+    /// inconnue **ou** proposition non enregistrée — jamais une classe commune
+    /// d'apprentissage. Le consommateur (routeur, mémoire) doit propager `None`
+    /// sans le replier sur `repr.unknown` pour l'attribution.
+    pub fn class_key(&self) -> Option<String> {
+        self.class.as_ref().map(|c| c.0.clone())
     }
 }
 
