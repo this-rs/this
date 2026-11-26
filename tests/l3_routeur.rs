@@ -498,7 +498,8 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
                 if premiere.is_none() && dec.applied {
                     premiere = Some((
                         dec.id.to_string(),
-                        dec.class_key().unwrap_or_default(),
+                        dec.class_key()
+                            .expect("identité cognitive attendue dans ce témoin"),
                         used.provider_id.clone(),
                         used.model.clone(),
                         ok,
