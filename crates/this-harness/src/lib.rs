@@ -52,6 +52,7 @@
 //! handle.interrupt();                               // ou arrêté, et dit
 //! ```
 
+pub mod attribution;
 mod catalogue;
 mod catalogue_toolbox;
 pub mod cognition;
