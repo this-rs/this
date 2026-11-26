@@ -25,11 +25,27 @@
 //! 7. Un **résultat indéterminé** (lecture de déduplication en échec) n'est JAMAIS
 //!    compté comme un effet confirmé.
 //! 8. Fermeture / réouverture : les tuples complets survivent intacts.
+//! 9. **H3** — une publication **réellement exécutée** dont la réponse se perd
+//!    laisse un effet durable dans Obrain et un cycle local `Indetermine` ; K et O
+//!    survivent à `settle`, une réception identique ne republie pas, une
+//!    consultation ne crée rien, et seule une relecture concordante confirme —
+//!    l'apprentissage étant compté une fois.
+//! 10. **H3, second témoin** — une **absence définitivement attestée** par
+//!     relecture libère la ré-publication, qui crée alors l'effet, une seule fois.
+//! 11. **H3, preuves insuffisantes** — un effet présent mais **illisible** ne se
+//!     confirme pas « par défaut » : le cycle reste indéterminé et la tentative
+//!     reste en souffrance pour une mesure ultérieure.
+//!
+//! Le cas 9 n'est PAS le cas 7 : au cas 7 la lecture de déduplication échoue avant
+//! toute écriture (Obrain vide), au cas 9 l'écriture a eu lieu et c'est la réponse
+//! qui manque (Obrain porte l'observation). Les deux signatures sont opposées, et
+//! les contre-épreuves les distinguent explicitement.
 //!
 //! Le nœud `observation` porte le **tuple complet**, avec `decision_id` comme
 //! champ propre (pas seulement fondu dans une clé composite) : c'est lui que les
 //! contre-épreuves relisent champ par champ.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,7 +55,8 @@ use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
 use this_harness::attribution::{
-    Attribution, Definition, Observation, Reception, Record, Resultat, RésolutionBackend,
+    Attribution, Definition, Etat, Observation, Reception, Record, Resultat, RésolutionBackend,
+    Tentative,
 };
 use this_harness::cognition::{LearnedClass, Prototype, SemanticEncoder, TaskRepr, classer};
 use this_harness::routing::{
@@ -136,6 +153,37 @@ struct Compteurs {
     served_none: u64,
     /// `settle` reçu avec un `Stop` non exploitable (Interrupted, Budget…).
     stop_non_exploitable: u64,
+    /// Publication **réellement exécutée** dont le VERDICT n'est jamais parvenu au
+    /// cycle local (perte de réponse entre le commit et l'enregistrement du
+    /// verdict). À ne pas confondre avec `indetermines`, qui compte une lecture de
+    /// déduplication en échec **avant** toute écriture : ici l'effet peut exister.
+    reponses_perdues: u64,
+    /// Résolutions qui ont CONFIRMÉ l'effet sur preuve suffisante (relecture
+    /// concordante). C'est le compteur d'apprentissage : il vaut 1 par cycle, jamais
+    /// davantage.
+    confirmations: u64,
+    /// Résolutions qui ont attesté une ABSENCE définitive (la tentative est
+    /// terminée et n'a rien commité) : la ré-publication redevient licite.
+    absences_resolues: u64,
+    /// Résolutions restées SANS PREUVE : relecture en échec, contenu divergent, ou
+    /// verdict refusé par la primitive. Le cycle reste indéterminé, rien ne se
+    /// confirme.
+    resolutions_sans_preuve: u64,
+}
+
+/// Le verdict qu'une **relecture d'Obrain** a réellement rendu. Il ne dit que ce
+/// que la mesure a montré — jamais ce qu'on espérait trouver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// L'effet est présent et identique au tuple attendu (K, O).
+    EffetAtteste,
+    /// L'effet est absent, et l'absence est certaine : la tentative est TERMINÉE
+    /// (sa transaction a rendu), elle ne peut plus commiter après coup.
+    AbsenceAttestee,
+    /// Un contenu est présent sous la même clé, mais il diverge du tuple attendu.
+    ContenuDivergent,
+    /// La relecture elle-même a échoué : on ne sait pas. Ni présent ni absent.
+    Illisible,
 }
 
 /// L'issue d'une tentative d'écriture, en quatre cas qu'il ne faut pas confondre.
@@ -172,6 +220,17 @@ struct Apprenant {
     /// déduplication (I/O, verrou empoisonné). Rend `Ecriture::Indetermine` au
     /// lieu d'assimiler l'échec à « absent ».
     lecture_en_echec: AtomicBool,
+    /// Seam de test, explicitement nommé, pour H3 : la publication est
+    /// **réellement exécutée** (le commit Obrain a lieu, l'effet est durable),
+    /// mais son verdict ne rejoint jamais le cycle local — la réponse est perdue
+    /// entre le commit et l'enregistrement. C'est la panne du processus qui meurt
+    /// après avoir écrit : l'effet existe et personne ne le sait. Le cycle reste
+    /// `Indetermine`, et il faudra RELIRE Obrain pour trancher.
+    reponse_perdue: AtomicBool,
+    /// Descripteurs des tentatives dont la réponse s'est perdue : ce qui rend une
+    /// résolution ultérieure légitime (autorité + décision + génération). Sans eux,
+    /// aucune relecture ne pourrait être appliquée au bon cycle.
+    tentatives_en_souffrance: Mutex<HashMap<u128, Tentative>>,
 }
 
 impl Apprenant {
@@ -185,6 +244,8 @@ impl Apprenant {
             attribution: Mutex::new(Attribution::new()),
             compteurs: Mutex::new(Compteurs::default()),
             lecture_en_echec: AtomicBool::new(false),
+            reponse_perdue: AtomicBool::new(false),
+            tentatives_en_souffrance: Mutex::new(HashMap::new()),
         }
     }
 
@@ -445,10 +506,26 @@ impl Apprenant {
             &observation.modele,
             observation.resultat == Resultat::Succes,
         );
+        if self.reponse_perdue.load(Ordering::Relaxed) {
+            // **H3 — la réponse se perd.** L'écriture a EU LIEU (ou a échoué : on
+            // ne le sait pas non plus), mais son verdict n'atteint jamais le cycle.
+            // Le cycle ne peut donc RIEN affirmer : il reste `Indetermine`, et le
+            // descripteur de tentative est conservé pour une résolution ultérieure.
+            // Rien n'est confirmé, rien n'est compté comme effet — et surtout,
+            // aucune ré-publication n'est possible tant que rien n'a été mesuré.
+            self.compteurs.lock().unwrap().reponses_perdues += 1;
+            let bascule = attr.indetermine(id, tentative);
+            debug_assert!(bascule, "EnCours → Indetermine doit réussir");
+            self.tentatives_en_souffrance
+                .lock()
+                .unwrap()
+                .insert(id, tentative);
+            return;
+        }
         match ecriture {
             Ecriture::Creee | Ecriture::RejeuIdentique => {
                 // Création ou rejeu strictement identique : effet attesté.
-                attr.confirmer(id, tentative);
+                self.confirmer_et_compter(attr, id, tentative);
             }
             Ecriture::Conflit => {
                 // Un conflit N'EST PAS une confirmation : l'observation n'est pas
@@ -462,9 +539,113 @@ impl Apprenant {
             }
             Ecriture::Indetermine => {
                 // Issue INCONNUE : exige une résolution, jamais une ré-publication.
+                // Le descripteur est conservé : c'est lui qui rend la résolution
+                // applicable au bon cycle (autorité + décision + génération).
                 attr.indetermine(id, tentative);
+                self.tentatives_en_souffrance
+                    .lock()
+                    .unwrap()
+                    .insert(id, tentative);
             }
         }
+    }
+
+    /// Confirme une tentative et compte l'apprentissage **une seule fois**.
+    /// C'est le SEUL point de comptage : ni la réception, ni la consultation, ni une
+    /// seconde résolution ne peuvent incrémenter deux fois pour le même cycle —
+    /// `Attribution::confirmer` refuse tout état déjà terminal.
+    fn confirmer_et_compter(&self, attr: &mut Attribution, id: u128, tentative: Tentative) -> bool {
+        if attr.confirmer(id, tentative) {
+            self.compteurs.lock().unwrap().confirmations += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// **Résolution native** d'une publication dont la réponse s'est perdue : on
+    /// RELIT Obrain — la seule source de vérité — et on applique au cycle le
+    /// verdict que la mesure a rendu.
+    ///
+    /// K (`definition.identite`) et O (`observation`) sont relus dans le cycle :
+    /// ils ont survécu à `settle`, et c'est exactement pour cela qu'on les garde —
+    /// sans eux la relecture ne saurait pas quel tuple attendre.
+    ///
+    /// Aucune supposition n'est possible : une relecture en échec rend `Illisible`,
+    /// donc une résolution `Indetermine`. Ni « présent » (qui confirmerait un effet
+    /// jamais lu), ni « absent » (qui ré-publierait sur un doublon).
+    ///
+    /// La tentative reste « en souffrance » tant que la résolution n'a pas tranché :
+    /// une mesure ultérieure, meilleure, reste donc licite.
+    fn resoudre_depuis_obrain(&self, id: u128) -> Option<Verdict> {
+        let tentative = self.tentatives_en_souffrance.lock().unwrap().remove(&id)?;
+        // K et O, relus dans le cycle — pas reconstruits, pas supposés.
+        let (identite, fournisseur, modele, favorable) = {
+            let attr = self.attribution.lock().unwrap();
+            let cycle = attr.etat(id)?;
+            let identite = cycle.definition.identite.clone()?;
+            let observation = cycle.observation.clone()?;
+            (
+                identite,
+                observation.fournisseur,
+                observation.modele,
+                observation.resultat == Resultat::Succes,
+            )
+        };
+        let evenement = format!("{}/{}", self.scope, id);
+        // C'est CETTE lecture qui prouve — et elle seule.
+        let verdict = match self.lit_existence(&evenement) {
+            Err(detail) => {
+                eprintln!("résolution SANS PREUVE (relecture en échec) : {detail}");
+                Verdict::Illisible
+            }
+            // Absence : la tentative est terminée, sa transaction a rendu, elle ne
+            // peut plus commiter après coup. L'absence est donc définitive pour
+            // CETTE tentative — c'est ce que le bail d'écriture (un seul écrivain)
+            // garantit.
+            Ok(false) => Verdict::AbsenceAttestee,
+            Ok(true) => match self.lire_contenu(&evenement) {
+                Some((i, p, m, f))
+                    if i == identite && p == fournisseur && m == modele && f == favorable =>
+                {
+                    Verdict::EffetAtteste
+                }
+                _ => Verdict::ContenuDivergent,
+            },
+        };
+        let resolution = match verdict {
+            Verdict::EffetAtteste => RésolutionBackend::EffetConfirme,
+            Verdict::AbsenceAttestee => RésolutionBackend::AbsenceDefinitive,
+            Verdict::ContenuDivergent => RésolutionBackend::Incompatible,
+            Verdict::Illisible => RésolutionBackend::Indetermine,
+        };
+        let mut attr = self.attribution.lock().unwrap();
+        // Ce que la mesure autorise, et RIEN de plus.
+        let decisive = match verdict {
+            Verdict::EffetAtteste => self.confirmer_et_compter(&mut attr, id, tentative),
+            Verdict::AbsenceAttestee => {
+                let applique = attr.resoudre(id, tentative, resolution);
+                if applique {
+                    self.compteurs.lock().unwrap().absences_resolues += 1;
+                }
+                applique
+            }
+            Verdict::ContenuDivergent | Verdict::Illisible => {
+                // Un contenu divergent laisse le cycle observable mais NON confirmé ;
+                // une relecture en échec ne tranche pas. Dans les deux cas on ne
+                // confirme RIEN : la tentative reste en souffrance.
+                attr.resoudre(id, tentative, resolution);
+                false
+            }
+        };
+        if !decisive {
+            self.compteurs.lock().unwrap().resolutions_sans_preuve += 1;
+            self.tentatives_en_souffrance
+                .lock()
+                .unwrap()
+                .insert(id, tentative);
+        }
+        Some(verdict)
     }
 }
 
@@ -1055,5 +1236,378 @@ fn fermeture_reouverture_conserve_les_tuples_complets() {
         drop(store);
     }
 
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---------------------------------------------------------------------------
+// 9. H3 — publication RÉELLE, perte de réponse, résolution par mesure
+// ---------------------------------------------------------------------------
+
+/// **H3 n'est pas le cas 7.** Au cas 7
+/// (`resultat_indetermine_n_est_pas_un_effet_confirme`), la lecture de
+/// déduplication échoue **avant** toute écriture : Obrain reste vide. Ici, l'effet
+/// durable est **réellement commité dans Obrain**, et c'est la RÉPONSE du commit
+/// qui se perd — la panne du processus qui meurt après avoir écrit. Les deux
+/// signatures observables sont opposées : 1 observation dans Obrain avec un cycle
+/// local indéterminé (cas 9), contre 0 observation et un cycle indéterminé (cas 7).
+///
+/// Ce que H3 vérifie, dans l'ordre :
+///   a. l'effet persistant existe — lu en GQL, jamais par un compteur RAM ;
+///   b. le cycle local reste `Indetermine`, K et O conservés au-delà de `settle` ;
+///   c. une réception identique ne republie pas et ne confirme pas ;
+///   d. une consultation ne crée aucun effet et ne confirme pas ;
+///   e. une résolution positive confirme, sur preuve RELUE et non sur espoir ;
+///   f. l'apprentissage est compté une seule fois.
+#[test]
+fn h3_publication_reelle_perte_de_reponse_puis_resolution_par_mesure() {
+    let d = dir("h3-perte-reponse");
+    let scope = "scope-h3";
+    let store = ObrainStore::open(&d).expect("ouverture");
+    let apprenant = Rc::new(Apprenant::nouveau(
+        store.clone(),
+        scope,
+        vec![Prototype {
+            class: LearnedClass("repr.K1".into()),
+            vector: vec![1.0, 0.0],
+        }],
+    ));
+    let routeur = routeur_pour(apprenant.clone());
+    let dec = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    assert_eq!(dec.cognitive_class.as_deref(), Some("repr.K1"));
+    let pick = dec.used.clone().expect("paire servie");
+    let id = dec.id;
+    let tuple_attendu = (
+        id.to_string(),
+        "repr.K1".to_string(),
+        pick.provider_id.clone(),
+        pick.model.clone(),
+        true,
+    );
+
+    // --- Publication RÉELLE dont la réponse se perd -------------------------
+    executer(apprenant.record(&dec));
+    apprenant.reponse_perdue.store(true, Ordering::Relaxed);
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    apprenant.reponse_perdue.store(false, Ordering::Relaxed);
+
+    // (a) L'EFFET PERSISTANT EXISTE — mesuré dans Obrain.
+    assert_eq!(
+        apprenant.tuples(),
+        vec![tuple_attendu.clone()],
+        "l'écriture a bien eu lieu : le tuple complet est durable"
+    );
+
+    // (b) LE CYCLE LOCAL RESTE INDÉTERMINÉ, et K / O survivent à `settle`.
+    {
+        let attr = apprenant.attribution.lock().unwrap();
+        let cycle = attr.etat(id).expect("cycle conservé");
+        assert_eq!(
+            cycle.etat,
+            Etat::Indetermine,
+            "le verdict n'est pas arrivé : issue inconnue, pas confirmée"
+        );
+        assert_eq!(
+            cycle.definition.identite.as_deref(),
+            Some("repr.K1"),
+            "K conservée au-delà de settle"
+        );
+        let o = cycle
+            .observation
+            .as_ref()
+            .expect("O conservée au-delà de settle");
+        assert_eq!(o.fournisseur, pick.provider_id);
+        assert_eq!(o.modele, pick.model);
+        assert_eq!(o.resultat, Resultat::Succes);
+    }
+    let c = apprenant.compteurs();
+    assert_eq!(
+        (c.creees, c.reponses_perdues, c.confirmations),
+        (1, 1, 0),
+        "écrit une fois, réponse perdue, rien de confirmé"
+    );
+    {
+        let mut attr = apprenant.attribution.lock().unwrap();
+        assert!(
+            attr.reserver(id).is_none(),
+            "aucune ré-publication tant que rien n'a été mesuré"
+        );
+    }
+
+    // (c) RÉCEPTION IDENTIQUE NE REPUBLIE PAS. La même observation est relivrée
+    // (livraison « au moins une fois ») : ce n'est PAS une preuve d'effet.
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    assert_eq!(
+        apprenant.compter_observations(),
+        1,
+        "pas de seconde écriture"
+    );
+    assert_eq!(apprenant.compteurs().creees, 1);
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Indetermine,
+        "une réception n'est pas une preuve : le cycle reste indéterminé"
+    );
+
+    // (d) CONSULTATION NE CRÉE PAS D'EFFET — sur le MÊME identifiant.
+    executer(apprenant.arms("repr.K1"));
+    // Décision CONSULTATIVE : la paire n'est pas servie. `Decision` est
+    // `non_exhaustive`, donc on part de la décision réelle pour en retirer la paire.
+    let mut consultative = dec.clone();
+    consultative.used = None;
+    executer(apprenant.record(&consultative));
+    assert_eq!(
+        apprenant.compter_observations(),
+        1,
+        "une consultation n'écrit rien"
+    );
+    assert_eq!(apprenant.compteurs().consultatives, 1);
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Indetermine,
+        "une consultation ne confirme pas"
+    );
+
+    // (e) RÉSOLUTION POSITIVE : les preuves sont suffisantes (effet présent ET
+    // identique). C'est la relecture qui confirme, pas le temps qui passe.
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        Some(Verdict::EffetAtteste)
+    );
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Confirme
+    );
+    assert_eq!(apprenant.compter_observations(), 1, "résoudre n'écrit pas");
+
+    // (f) L'APPRENTISSAGE EST COMPTÉ UNE SEULE FOIS.
+    assert_eq!(apprenant.compteurs().confirmations, 1);
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        None,
+        "plus de tentative en souffrance : rien à résoudre"
+    );
+    assert_eq!(
+        apprenant.compteurs().confirmations,
+        1,
+        "une seconde résolution ne double pas la comptabilité"
+    );
+    // Et un rejeu complet après confirmation n'ajoute rien.
+    executer(apprenant.record(&dec));
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    assert_eq!(apprenant.compter_observations(), 1);
+    assert_eq!(apprenant.compteurs().confirmations, 1);
+    assert_eq!(apprenant.tuples(), vec![tuple_attendu]);
+
+    store.commit_wal().expect("flush");
+    drop(routeur);
+    drop(apprenant);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---------------------------------------------------------------------------
+// 10. H3, second témoin — reprise après absence DÉFINITIVEMENT attestée
+// ---------------------------------------------------------------------------
+
+/// La perte de réponse ne condamne pas le cycle : quand la relecture ATTESTE une
+/// absence, la ré-publication redevient licite et crée réellement l'effet.
+///
+/// L'absence est dite « définitive » pour une raison vérifiable, pas par confort :
+/// la tentative est TERMINÉE (sa transaction a rendu — ici l'écriture a été refusée
+/// d'entrée par un bail périmé), elle ne peut donc plus commiter après coup, et le
+/// bail d'écriture garantit un seul écrivain. Une absence mesurée dans ces
+/// conditions engage l'avenir de CETTE tentative.
+#[test]
+fn h3_reprise_apres_absence_definitivement_attestee() {
+    use this::storage::writer_lease::FileAuthority;
+
+    let d = dir("h3-absence");
+    let scope = "scope-h3-abs";
+    let store = ObrainStore::open(&d).expect("ouverture");
+    let apprenant = Rc::new(Apprenant::nouveau(
+        store.clone(),
+        scope,
+        vec![Prototype {
+            class: LearnedClass("repr.K1".into()),
+            vector: vec![1.0, 0.0],
+        }],
+    ));
+    let routeur = routeur_pour(apprenant.clone());
+    let authority = FileAuthority::new(d.as_path());
+    store
+        .enable_write_fencing_with(&authority)
+        .expect("bail armé");
+
+    let dec = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    let pick = dec.used.clone().expect("paire servie");
+    let id = dec.id;
+
+    // Un autre écrivain a repris le shard : cette publication sera refusée POUR SÛR.
+    store.fence_write_lease_for_test(2);
+
+    // Publication tentée, réponse perdue : on ignore ce qui s'est passé.
+    executer(apprenant.record(&dec));
+    apprenant.reponse_perdue.store(true, Ordering::Relaxed);
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    apprenant.reponse_perdue.store(false, Ordering::Relaxed);
+
+    assert_eq!(apprenant.compter_observations(), 0, "rien n'a été écrit");
+    let c = apprenant.compteurs();
+    assert_eq!((c.erreurs, c.reponses_perdues, c.creees), (1, 1, 0));
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Indetermine,
+        "issue inconnue : on ne conclut rien"
+    );
+
+    // La RELECTURE atteste l'absence : rien sous la clé, et plus rien ne peut y
+    // apparaître puisque la tentative est terminée.
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        Some(Verdict::AbsenceAttestee)
+    );
+    let c = apprenant.compteurs();
+    assert_eq!(
+        (c.absences_resolues, c.confirmations),
+        (1, 0),
+        "une absence attestée ne confirme RIEN"
+    );
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Recu,
+        "la ré-publication redevient licite"
+    );
+
+    // Le bail est rendu : la reprise écrit réellement, et une seule fois.
+    store.release_write_fencing();
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+
+    assert_eq!(
+        apprenant.compter_observations(),
+        1,
+        "la reprise crée l'effet"
+    );
+    assert_eq!(
+        apprenant.tuples(),
+        vec![(
+            id.to_string(),
+            "repr.K1".to_string(),
+            pick.provider_id.clone(),
+            pick.model.clone(),
+            true,
+        )]
+    );
+    let c = apprenant.compteurs();
+    assert_eq!(
+        (c.creees, c.confirmations, c.erreurs),
+        (1, 1, 1),
+        "une création, un apprentissage, l'échec passé toujours compté"
+    );
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Confirme
+    );
+
+    // Une dernière livraison identique ne change plus rien.
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    assert_eq!(apprenant.compter_observations(), 1);
+    assert_eq!(apprenant.compteurs().confirmations, 1);
+
+    store.commit_wal().expect("flush");
+    drop(routeur);
+    drop(apprenant);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---------------------------------------------------------------------------
+// 11. H3, preuves INSUFFISANTES — effet présent mais illisible
+// ---------------------------------------------------------------------------
+
+/// L'effet existe dans Obrain, mais la relecture qui devait l'attester échoue.
+/// Rien ne se confirme alors « par défaut » : l'issue reste indéterminée et
+/// l'apprentissage n'est pas compté. Le cycle n'est pas perdu pour autant — la
+/// tentative reste en souffrance, et une mesure ultérieure, réussie, tranchera.
+///
+/// Signature, encore une fois opposée au cas 7 : ici Obrain contient l'observation
+/// (1 ligne) et le cycle reste indéterminé ; au cas 7 Obrain est vide et le cycle
+/// reste indéterminé. Le cas 11 n'est donc pas une variante du cas 7 — c'est le
+/// cas où l'ÉCRITURE a eu lieu et où la LECTURE manque.
+#[test]
+fn h3_effet_present_mais_illisible_ne_confirme_pas() {
+    let d = dir("h3-illisible");
+    let scope = "scope-h3-ill";
+    let store = ObrainStore::open(&d).expect("ouverture");
+    let apprenant = Rc::new(Apprenant::nouveau(
+        store.clone(),
+        scope,
+        vec![Prototype {
+            class: LearnedClass("repr.K1".into()),
+            vector: vec![1.0, 0.0],
+        }],
+    ));
+    let routeur = routeur_pour(apprenant.clone());
+    let dec = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    let pick = dec.used.clone().expect("paire servie");
+    let id = dec.id;
+
+    // Publication réelle, réponse perdue.
+    executer(apprenant.record(&dec));
+    apprenant.reponse_perdue.store(true, Ordering::Relaxed);
+    executer(apprenant.settle(id, Some(&pick), &Stop::Done, None));
+    apprenant.reponse_perdue.store(false, Ordering::Relaxed);
+    assert_eq!(apprenant.compter_observations(), 1, "l'effet est bien là");
+
+    // La relecture de résolution échoue : preuve insuffisante.
+    apprenant.lecture_en_echec.store(true, Ordering::Relaxed);
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        Some(Verdict::Illisible),
+        "une relecture en échec ne prétend ni présent ni absent"
+    );
+    apprenant.lecture_en_echec.store(false, Ordering::Relaxed);
+
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Indetermine,
+        "rien ne se confirme sans preuve"
+    );
+    let c = apprenant.compteurs();
+    assert_eq!(
+        (
+            c.confirmations,
+            c.absences_resolues,
+            c.resolutions_sans_preuve
+        ),
+        (0, 0, 1),
+        "aucune résolution décisive, et cela se voit dans la comptabilité"
+    );
+    assert_eq!(
+        apprenant.compter_observations(),
+        1,
+        "l'effet reste dans Obrain"
+    );
+
+    // La mesure redevient disponible : elle tranche, et l'apprentissage est compté
+    // une seule fois.
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        Some(Verdict::EffetAtteste)
+    );
+    assert_eq!(
+        apprenant.attribution.lock().unwrap().etat(id).unwrap().etat,
+        Etat::Confirme
+    );
+    assert_eq!(apprenant.compteurs().confirmations, 1);
+    assert_eq!(
+        apprenant.resoudre_depuis_obrain(id),
+        None,
+        "plus rien à résoudre : la comptabilité ne peut pas doubler"
+    );
+
+    store.commit_wal().expect("flush");
+    drop(routeur);
+    drop(apprenant);
+    drop(store);
     let _ = std::fs::remove_dir_all(&d);
 }
