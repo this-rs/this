@@ -97,7 +97,9 @@ pub trait PoolSource {
 /// reçoit chaque décision et chaque fin de tour pour les nourrir.
 #[async_trait(?Send)]
 pub trait Learning {
-    /// Les bras stockés de la classe `class` (clé de [`TurnSignature::arm_key`]).
+    /// Les bras stockés pour la classe `class`. Cette clé est l'identité cognitive
+    /// issue de [`Learning::classify`] (ou la clé neutre d'incertitude) — **pas**
+    /// [`TurnSignature::arm_key`], qui n'est qu'une métadonnée de compatibilité.
     async fn arms(&self, _class: &str) -> Vec<ArmStats> {
         Vec::new()
     }
