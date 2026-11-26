@@ -100,6 +100,10 @@ fn h3_v2_cycle_harness_reel_nominal() {
         Reception::Recu
     );
 
+    // RÉSERVATION AVANT PUBLICATION : la génération de tentative est assignée ICI,
+    // avant toute écriture durable.
+    let tentative = attr.reserver(decision_id).expect("réservation");
+
     // 2. PRÉPARATION + 3. CONSERVATION DE RÉFÉRENCE (octets persistés AVANT publication).
     let (reference_bytes, id) = {
         let store = SubstrateStore::create(&chemin).expect("création");
@@ -131,8 +135,7 @@ fn h3_v2_cycle_harness_reel_nominal() {
         matches!(verdict, RésolutionBackend::EffetConfirme),
         "l'effet est engagé ET canonique : confirmé"
     );
-    // La réconciliation alimente le cycle harness (RAM, recréé).
-    let tentative = attr.reserver(decision_id).expect("réservation");
+    // La réconciliation alimente le cycle harness avec la tentative réservée AVANT publication.
     assert!(attr.resoudre(decision_id, tentative, verdict));
     assert_eq!(attr.etat(decision_id).unwrap().etat, Etat::Confirme);
     store2.close().expect("fermeture 2");
