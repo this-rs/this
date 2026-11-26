@@ -52,7 +52,7 @@ struct EncSynthetique;
 
 impl SemanticEncoder for EncSynthetique {
     fn encode(&self, text: &str) -> Option<Vec<f32>> {
-        TEXTES.iter().position(|(_, t)| *t == text).map(|i| {
+        TEXTES.iter().position(|(_, _, t)| *t == text).map(|i| {
             let mut v = vec![0.0f32; TEXTES.len()];
             v[i] = 1.0;
             v
@@ -64,7 +64,7 @@ impl SemanticEncoder for EncSynthetique {
 fn classe_du_vecteur(repr: &TaskRepr) -> Option<&'static str> {
     let v = repr.embedding.as_ref()?;
     let i = v.iter().position(|x| *x > 0.5)?;
-    TEXTES.get(i).map(|(c, _)| *c)
+    TEXTES.get(i).map(|(_, c, _)| *c)
 }
 
 fn executer<F: std::future::Future<Output = T>, T>(f: F) -> T {
@@ -103,11 +103,16 @@ const PROVIDERS: [&str; 4] = ["a", "b", "c", "d"];
 const MODELES: [&str; 4] = ["m1", "m2", "m3", "m4"];
 
 /// Texte synthétique de chaque identité cognitive (lu par l'encodeur du banc).
-const TEXTES: [(&str, &str); 4] = [
-    ("repr.c0", "pourquoi ça échoue avec une erreur ?"),
-    ("repr.c1", "explique comment fonctionne le routage"),
-    ("repr.c2", "change le code existant et relis-le"),
+/// (clé_stable, identité, texte). La clé stable `k0..k3` est INDÉPENDANTE du nom
+/// de l'identité et de sa position : renommer `repr.c0` ou permuter l'ordre ne
+/// change pas les résultats latents. L'identité est une connaissance expérimentale,
+/// la clé stable est l'identifiant du simulateur.
+const TEXTES: [(&str, &str, &str); 4] = [
+    ("k0", "repr.c0", "pourquoi ça échoue avec une erreur ?"),
+    ("k1", "repr.c1", "explique comment fonctionne le routage"),
+    ("k2", "repr.c2", "change le code existant et relis-le"),
     (
+        "k3",
         "repr.c3",
         "implémente une nouvelle fonctionnalité et planifie-la",
     ),
@@ -181,11 +186,14 @@ fn tirage(classe: &str, provider: &str, j: usize, graine: u64) -> bool {
     // Le tirage est indexé par la POSITION de l'identité dans `TEXTES`, pas par
     // son nom : renommer `repr.c0` → autre chose ne change pas les résultats
     // latents (indépendants du nom et de la stratégie évaluée).
-    let idx = TEXTES
+    // Le tirage est indexé par la CLÉ STABLE de l'identité (indépendante du nom et
+    // de l'ordre), pas par sa position ni son nom.
+    let cle = TEXTES
         .iter()
-        .position(|(c, _)| *c == classe)
+        .find(|(_, c, _)| *c == classe)
+        .map(|(k, _, _)| *k)
         .expect("identité inconnue du banc : ne pas l'assimiler à la première");
-    let mut etat = fnv1a(&format!("{graine}/{idx}/{provider}"));
+    let mut etat = fnv1a(&format!("{graine}/{cle}/{provider}"));
     for _ in 0..=j {
         lcg(&mut etat);
     }
@@ -571,9 +579,9 @@ fn jouer(learning: Rc<dyn Learning>, couts: Rc<Couts>) -> Bilan {
             for classe in classes {
                 let texte = TEXTES
                     .iter()
-                    .find(|(c, _)| c == classe)
+                    .find(|(_, c, _)| c == classe)
                     .expect("texte de la classe")
-                    .1;
+                    .2;
                 let routed = executer(routeur.route(TurnInput {
                     text: texte,
                     has_images: false,
@@ -759,4 +767,23 @@ fn l4_natif_cycle_du_routeur_et_couts() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn la_reproduction_est_exacte_sous_la_meme_graine() {
+    // Même graine, même identité, même candidat → même tirage, bit à bit.
+    let a = tirage("repr.c0", "a", 0, 11);
+    let b = tirage("repr.c0", "a", 0, 11);
+    assert_eq!(a, b);
+    // La clé stable est extraite PAR IDENTITÉ, pas par position : permuter l'ordre
+    // ne change pas le tirage d'une identité donnée (la clé k0 reste k0).
+    let c = tirage("repr.c0", "b", 1, 7);
+    let d = tirage("repr.c0", "b", 1, 7);
+    assert_eq!(c, d);
+}
+
+#[test]
+#[should_panic(expected = "identité inconnue du banc")]
+fn une_identite_inconnue_panique_au_lieu_de_s_assimiler() {
+    let _ = tirage("repr.inconnue", "a", 0, 11);
 }
