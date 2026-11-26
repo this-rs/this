@@ -1,0 +1,6 @@
+# Suite H3 V2 — verdict sur SHA figé 82a35aff (obrain 89d169d7)
+date = 2026-11-26T12:24:46Z
+h3_v2_cycle_harness = 5 passed, 0 failed
+h3_v2_chaine_autorite = 7 passed, 0 failed (dont reconstruction durable après disparition)
+TOTAL = 12 passed, 0 failed
+cargo test --features obrain --no-run = toute la suite tests/ compile (sans erreur)

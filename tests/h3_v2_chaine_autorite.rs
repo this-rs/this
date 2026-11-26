@@ -415,3 +415,73 @@ fn h3_v2_deux_tentatives_references_distinctes() {
     store.close().expect("fermeture");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Durabilité : l'enregistrement original est reconstruit depuis un MÉDIUM durable
+/// (fichiers), après disparition du consommateur. Une variable RAM d'octets
+/// sérialisés ne suffit pas : on vérifie la reconstruction effective de K, génération,
+/// autorité (backend), cible, référence et contenu attendu, puis la réconciliation.
+#[test]
+fn h3_v2_enregistrement_reconstruit_apres_disparition() {
+    let d = dir("durable");
+    let chemin = d.join("kb");
+    let rec_file = d.join("enregistrement.txt");
+    let ref_file = d.join("reference.bin");
+
+    // 1. Décision → préparation → conservation → PERSISTANCE sur fichier (pas RAM).
+    {
+        let store = SubstrateStore::create(&chemin).expect("création");
+        let id = store.create_node(&["ressource"]);
+        store.set_node_property(id, "a", Value::Int64(1));
+        let pre: Precondition = store.capturer_precondition(id, &["a"]).expect("capture");
+        let prep = store
+            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .expect("préparation");
+        let reference = prep.reference_tentative();
+        let (backend, cible, horloge) = (reference.auteur(), reference.cible().0, reference.horloge());
+        // Référence (octets opaques) sur un fichier binaire.
+        std::fs::write(&ref_file, reference.to_bytes()).expect("persistance référence");
+        // Métadonnées (K, backend, génération, cible, effets attendus) sur un fichier texte.
+        let meta = format!("k=k1\nbackend={backend}\ngeneration=1\ncible={cible}\nhorloge={horloge}\neffets=a:10\n");
+        std::fs::write(&rec_file, &meta).expect("persistance enregistrement");
+        store.publier_si_precondition_intacte(prep).expect("publication");
+        store.close().expect("fermeture");
+    }
+    // 2. DISPARITION du consommateur : tout état RAM est hors de portée.
+
+    // 3. RECONSTRUCTION depuis le médium durable.
+    let store2 = SubstrateStore::open(&chemin).expect("réouverture");
+    let reference_bytes = std::fs::read(&ref_file).expect("lecture référence");
+    let meta = std::fs::read_to_string(&rec_file).expect("lecture enregistrement");
+    let champ = |nom: &str| -> String {
+        meta.lines()
+            .find_map(|l| l.strip_prefix(&format!("{nom}=")).map(str::to_string))
+            .unwrap_or_else(|| panic!("champ {nom} absent de l'enregistrement reconstruit"))
+    };
+    // Vérifier chaque champ reconstruit contre la décision originale.
+    assert_eq!(champ("k"), "k1", "K reconstruit");
+    assert_eq!(champ("generation"), "1", "génération reconstruite");
+    assert_eq!(champ("effets"), "a:10", "contenu attendu reconstruit");
+
+    let reference = ReferenceTentative::from_bytes(&reference_bytes).expect("décodage");
+    // Autorité backend + cible reconstruits doivent égaler ceux de la référence (cohérence durable).
+    assert_eq!(reference.auteur().to_string(), champ("backend"), "autorité backend reconstruite");
+    assert_eq!(reference.cible().0.to_string(), champ("cible"), "cible reconstruite");
+
+    // 4. Résolution + réconciliation contre l'enregistrement RECONSTRUIT.
+    let enr = EnregistrementOriginal {
+        k: champ("k"),
+        backend: champ("backend").parse().expect("backend u64"),
+        generation: champ("generation").parse().expect("generation u64"),
+        cible: reference.cible(),
+        effets_attendus: vec![("a".to_string(), 10)],
+        reference_bytes: reference.to_bytes(),
+    };
+    let res = store2.resoudre_reference(&reference).expect("résolution");
+    assert_eq!(
+        reconcilier_chaine(&enr, &reference, &res, &store2),
+        VerdictChaine::Confirme,
+        "l'enregistrement reconstruit après disparition confirme la décision originale"
+    );
+    store2.close().expect("fermeture 2");
+    let _ = std::fs::remove_dir_all(&d);
+}
