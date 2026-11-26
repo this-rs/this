@@ -105,10 +105,10 @@ impl Learning for Appris {
     }
 
     async fn record(&self, d: &Decision) {
-        if d.used.is_some() {
-            if let Some(c) = d.class_key() {
-                self.en_cours.lock().unwrap().insert(d.id, c);
-            }
+        if d.used.is_some()
+            && let Some(c) = d.class_key()
+        {
+            self.en_cours.lock().unwrap().insert(d.id, c);
         }
     }
 

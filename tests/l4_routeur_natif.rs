@@ -388,10 +388,10 @@ impl Learning for LocalSeul {
         bras
     }
     async fn record(&self, d: &Decision) {
-        if d.used.is_some() {
-            if let Some(c) = d.class_key() {
-                self.en_cours.lock().unwrap().insert(d.id, c);
-            }
+        if d.used.is_some()
+            && let Some(c) = d.class_key()
+        {
+            self.en_cours.lock().unwrap().insert(d.id, c);
         }
     }
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
@@ -433,10 +433,10 @@ impl Learning for Relationnel {
         bras
     }
     async fn record(&self, d: &Decision) {
-        if d.used.is_some() {
-            if let Some(c) = d.class_key() {
-                self.en_cours.lock().unwrap().insert(d.id, c);
-            }
+        if d.used.is_some()
+            && let Some(c) = d.class_key()
+        {
+            self.en_cours.lock().unwrap().insert(d.id, c);
         }
     }
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
