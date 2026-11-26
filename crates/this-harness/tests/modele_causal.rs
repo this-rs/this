@@ -1287,8 +1287,8 @@ impl Exploration {
     /// B n'est pas V : si B était le verdict, ces deux actions seraient la même.
     fn meme_verdict_deux_backends(&self) -> Option<(usize, Action, Action)> {
         let index = self.index();
-        for i in 0..self.noeuds.len() {
-            if !self.noeuds[i]
+        for (i, noeud) in self.noeuds.iter().enumerate() {
+            if !noeud
                 .monde
                 .cycles
                 .values()
@@ -1296,7 +1296,7 @@ impl Exploration {
             {
                 continue;
             }
-            for (d, c) in &self.noeuds[i].monde.cycles {
+            for (d, c) in &noeud.monde.cycles {
                 let Some(k) = c.vivante else { continue };
                 let p = Prov { aut: AUTORITE, k };
                 for verdict in VERDICTS {
