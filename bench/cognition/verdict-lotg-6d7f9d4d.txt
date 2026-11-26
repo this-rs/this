@@ -1,0 +1,104 @@
+# Verdict — Lot G : audit et convergence A/B (K u128 + durabilité OBRR)
+
+commit        = 6d7f9d4d6704bb2a045f48addd5b279151d135fa
+branche       = chore/lot-g-convergence-ab
+parent        = 7e5732b9f3311513b0c130e4719ff906f8033a9e (référence commune)
+A (audité)    = 0b234822a4398fb98fdf7694920d47d87f915895  (chore/lot-a-k-durable)
+B (audité)    = 73a27273aea5330502674644bb890d2f889abffd → 13a6aabc24edcd792c82e288864af4869874950d → b3ec6b061b73af8d91f0fd186e6e2301a8a220ae
+obrain        = 89d169d7d481c59018b712d499b8180c384fd405
+rustc         = 1.97.1 (8bab26f4f 2026-07-14, toolchain « stable »)
+sha256(Cargo.lock) = 825e75f6af07665deddb52928974ffa7b8949accba06b2ba72bf7373e628c9b5
+
+## Registre épistémique
+- RELU : autorite_k.rs de A (0b234822) — K = String "identite-compteur",
+  identite_fraiche() = temps+pid+séquence, persister() = std::fs::write sans fsync.
+- RELU : reconciliation.rs de B (73a27273) — ecrire_durable (fsync fichier avant
+  rename, fsync répertoire après), qualifier/relire_qualifie, quarantaine V1/V2,
+  admissibilite, resoudre_obligation.
+- RELU : arbitrage K/ObservationId (note persistante) — K doit être u128.
+- MESURÉ : 62 tests verts, EXIT=0 (commande ci-dessous).
+
+## Audit de A (0b234822) — INCOMPATIBLE avec l'arbitrage K/ObservationId
+`src/autorite_k.rs` de A définit `AutoriteK { identite: String, compteur: u64 }`
+et `emettre() -> String` avec `K = "identite-compteur"`. `identite_fraiche()`
+dérive l'identité de `SystemTime::now()` + `std::process::id()` + une séquence
+`AtomicU64`. Verdict : K n'est PAS un u128 ; la chaîne n'est pas un simple
+encodage ; pid+compteur local n'est pas une preuve d'unicité globale ; le
+compteur n'est pas partagé entre processus ; la persistance (`persister`) est un
+`std::fs::write` SANS fsync ni atomicité (un second registre, plus faible que
+celui de B). L'arbitrage (3ee9a6a9) exige K = u128 compatible ObservationId.
+
+## Audit de B (73a27273→b3ec6b06) — durabilité conforme
+`ecrire_durable` établit l'atomicité (temporaire + rename) ET la durabilité
+(fsync fichier avant rename, fsync répertoire après), ordre observable via
+`ecrire_durable_observe`. `qualifier`/`relire_qualifie` classent tout octet en
+Courant / QuarantaineLegacy (V1) / QuarantaineIllisible, préservant octets +
+provenance (jamais de refus qui efface). `admissibilite` refuse les corruptions
+syntaxiquement valides (K vide/blanc, génération 0, autorité 0). Verdict de B
+déjà consigné (54 tests) : préservé, intégré, non remis en cause.
+
+## Correction appliquée (la fusion)
+1. K = u128 partout (EnregistrementOriginal.k), encodage 16 octets LE dans le
+   record V2 (ENREGISTREMENT_VERSION reste 2 — format expérimental, jamais
+   publié). La vue V1 historique conserve sa chaîne (format legacy figé).
+2. `AutoriteK` réécrite : compteur u128 monotone (émission depuis 1, 0 = jamais
+   émise), persisté via `reconciliation::ecrire_durable` (réutilise la garantie
+   de B, pas un second registre), `checked_add` (saturation refusée), état
+   corrompu/nul refusé nommément (jamais de réinitialisation silencieuse).
+3. `verifier_liaison(record, tentative)` confronte `autorite_consommateur` à
+   `tentative.autorite()` (tentative étrangère refusée) et exige `k != 0`.
+4. `resoudre_operation` rend la liaison OBLIGATOIRE : aucune transition
+   `Attribution::resoudre` sans `verifier_liaison` (les deltas A — l'enum
+   `IssueResolutionOperation` et `resoudre_operation` — et B coexistent).
+5. `admissibilite` refuse `k == 0` (corruption syntaxiquement valide, jamais
+   émise).
+
+## Commande exécutée
+cargo test --features obrain,objects-toolbox --offline \
+  --test k_durable_autorite --test durabilite_obrr --test h3_v2_cycle_harness \
+  --test h3_v2_chaine_autorite --test reconciliation_composant --test concurrence_g1g5
+cargo test -p this-harness --offline --test modele_causal
+
+## Résultats (MESURÉ, EXIT=0)
+G1-G5 (concurrence) 5 · durabilité OBRR 15 · H3 chaîne 7 · H3 cycle 5 ·
+composant 2 · k_durable_autorite 8 (les huit scénarios A) · modele_causal 20
+= 62 verts, 0 failed, EXIT=0.
+
+## Les huit témoins de A (k_durable_autorite) — verts
+1. même opération après redémarrage (K stable, génération/autorité réémises)
+2. nouvelle tentative après refus certain (même K, génération incrémentée)
+3. ancienne tentative indéterminée (K inchangé)
+4. deux opérations indépendantes de contenu identique (K distincts)
+5. deux opérations d'une même classe (K distincts)
+6. collision de decision_id (K distingue, liaison lie l'autorité)
+7. tentative étrangère refusée (même decision_id+génération, autre autorité)
+8. corruption valide de K/génération (K nul / génération 99 → liaison refusée)
+
+## Vérifications demandées
+- allocation interprocessus : émission séquentielle durable (scénario 4, deux
+  processus sur la MÊME autorité K → K distincts). NON mesuré : émission
+  CONCURRENTE simultanée (pas de verrou interprocessus sur l'autorité K — limite
+  documentée, le modèle opérationnel est « une autorité par store, un écrivain »).
+- persistance avant publication : emettre() persiste AVANT de rendre K.
+- redémarrage : compteur restauré (ouvrir relit), jamais régénéré.
+- copie/restauration : la restauration d'un état corrompu est refusée (pas de
+  réinitialisation silencieuse) — non testée : restauration d'une SAUVEGARDE
+  antérieure (ré-émission d'un K déjà publié, hors périmètre).
+- corruption : état tronqué ou compteur nul → InvalidData nommé.
+- saturation : checked_add → erreur nommée (pas de wrap silencieux).
+- refus des tentatives étrangères : verifier_liaison confronte tentative.autorite().
+- liaison à l'autorité active : resoudre_operation (chemin opérationnel) l'impose.
+- récupération des obligations : resoudre_obligation (V1) — non attestée, jamais
+  absente définitivement (hérité de B, vert).
+
+## Non mesuré / limites (honnêteté)
+- survie à une coupure d'alimentation (fsync = condition nécessaire, pas preuve).
+- émission CONCURRENTE simultanée de K (pas de verrou sur l'autorité K).
+- ObservationId n'existe pas dans obrain@89d169d7 (PR #418 postérieure) : la
+  compatibilité K=u128 est au niveau du TYPE (from_u128/as_u128), non exercée
+  contre le type concret.
+
+## Registre du verdict
+MESURÉ (62 verts, commandes, exit) · RELU (deltas A et B, arbitrage) ·
+SUPPOSÉ (aucun). Non qualifié : survie coupure d'alimentation, concurrence
+simultanée de K, restauration de sauvegarde antérieure.
