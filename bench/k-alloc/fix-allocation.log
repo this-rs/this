@@ -1,0 +1,65 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-alloc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.98s
+     Running tests/k_allocation_atomique.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/ea760d625a7d734e/out/k_allocation_atomique-ea760d625a7d734e)
+
+running 9 tests
+test collision_concurrente_interleaving_deterministe ... 
+running 1 test
+
+running 1 test
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.09s
+
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.11s
+
+MESURÉ : K(a)=2  K(b)=1  état durable=3
+ok
+test compteur_regresse_refuse_dans_un_processus_vivant ... ok
+test contention_multiprocessus_sans_doublon ... 
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.28s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.83s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.87s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 1.92s
+
+MESURÉ : 80 K émis (80 attendus)
+ok
+test corruption_refusee_sans_reinitialisation ... 
+running 1 test
+test corruption_refusee_sans_reinitialisation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+ok
+test domaine_canonique_deux_fichiers_deux_autorites ... MESURÉ : K(A)=1 K(B)=1 sur deux domaines distincts
+ok
+test interruption_apres_persistance_ne_reattribue_jamais ... 
+running 1 test
+MESURÉ : K brûlé=1  état durable=2
+ok
+test obrr_v1_string_jamais_reinterprete_en_u128 ... ok
+test verrou_porte_sur_un_objet_distinct_de_l_etat_renomme ... ok
+test vue_perimee_vs_etat_durable_relu_sous_verrou ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+

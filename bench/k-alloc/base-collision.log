@@ -1,0 +1,86 @@
+     Locking 788 packages to highest Rust 1.100.0 compatible versions
+      Adding argon2 v0.5.3 (available: v0.6.0)
+      Adding base64 v0.22.1 (available: v0.23.1)
+      Adding ed25519-dalek v2.2.0 (available: v3.0.0)
+      Adding generic-array v0.14.7 (available: v0.14.9)
+      Adding hmac v0.12.1 (available: v0.13.0)
+      Adding jsonwebtoken v9.3.1 (available: v12.0.0)
+      Adding mdns-sd v0.13.11 (available: v0.21.7)
+      Adding sha2 v0.10.9 (available: v0.11.2)
+      Adding wasmparser v0.228.0 (available: v0.263.0)
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-base)
+   Compiling this-descriptor v0.0.1 (/Users/triviere/projects/this-rs/_wt-k-base/crates/this-descriptor)
+   Compiling this-agent v0.0.1 (/Users/triviere/projects/this-rs/_wt-k-base/crates/this-agent)
+   Compiling this-llm v0.0.1 (/Users/triviere/projects/this-rs/_wt-k-base/crates/this-llm)
+   Compiling this-harness v0.0.1 (/Users/triviere/projects/this-rs/_wt-k-base/crates/this-harness)
+   Compiling this-vfs v0.0.1 (/Users/triviere/projects/this-rs/_wt-k-base/crates/this-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 03s
+     Running tests/k_collision_concurrente.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/429ebfd1943f7c31/out/k_collision_concurrente-429ebfd1943f7c31)
+
+running 2 tests
+test collision_concurrente_interleaving_deterministe ... 
+running 1 test
+
+running 1 test
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.07s
+
+FAILED
+test contention_multiprocessus_sans_doublon ... 
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.75s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.78s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.79s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.81s
+
+FAILED
+
+failures:
+
+---- collision_concurrente_interleaving_deterministe stdout ----
+MESURÉ : K(a)=1  K(b)=1  état durable=2
+
+thread 'collision_concurrente_interleaving_deterministe' (221039168) panicked at tests/k_collision_concurrente.rs:136:5:
+assertion `left == right` failed: COLLISION : les deux processus ont publié le même K (1 et 1) ; l'état durable vaut 2 au lieu de 3
+  left: [1, 1]
+ right: [1, 2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- contention_multiprocessus_sans_doublon stdout ----
+MESURÉ : 80 K émis, 20 distincts (80 attendus)
+
+thread 'contention_multiprocessus_sans_doublon' (221039192) panicked at tests/k_collision_concurrente.rs:188:5:
+assertion `left == right` failed: DOUBLONS : 20 K seulement sont distincts sur 80 émissions
+  left: 20
+ right: 80
+
+
+failures:
+    collision_concurrente_interleaving_deterministe
+    contention_multiprocessus_sans_doublon
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+error: test failed, to rerun pass `--test k_collision_concurrente`

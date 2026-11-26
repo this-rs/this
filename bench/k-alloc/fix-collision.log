@@ -1,0 +1,46 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-alloc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.13s
+     Running tests/k_collision_concurrente.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/429ebfd1943f7c31/out/k_collision_concurrente-429ebfd1943f7c31)
+
+running 2 tests
+test collision_concurrente_interleaving_deterministe ... 
+running 1 test
+
+running 1 test
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.14s
+
+ok
+test contention_multiprocessus_sans_doublon ... 
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.35s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.36s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.54s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.57s
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
+

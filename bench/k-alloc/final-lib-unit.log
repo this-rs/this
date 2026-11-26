@@ -1,0 +1,6 @@
+test autorite_k::tests::saturation_refusee_sans_repli ... ok
+test autorite_k::tests::ordre_mesure_verrou_puis_lecture_puis_persistance_puis_publication ... ok
+test autorite_k::tests::deux_instances_meme_processus_n_emettent_jamais_le_meme_k ... ok
+test autorite_k::tests::corruption_refusee_pas_de_reinitialisation_silencieuse ... ok
+test autorite_k::tests::compteur_u128_durable_et_monotone ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1374 filtered out; finished in 0.10s

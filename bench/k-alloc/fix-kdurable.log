@@ -1,0 +1,41 @@
+    Blocking waiting for file lock on package cache
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-alloc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.35s
+     Running tests/k_durable_autorite.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/621f487418174a69/out/k_durable_autorite-621f487418174a69)
+
+running 8 tests
+test scenario_1_meme_operation_apres_redemarrage ... 
+running 1 test
+test scenario_1_meme_operation_apres_redemarrage ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.19s
+
+ok
+test scenario_2_nouvelle_tentative_apres_refus_certain ... ok
+test scenario_3_ancienne_tentative_indeterminee ... 
+running 1 test
+test scenario_3_ancienne_tentative_indeterminee ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.19s
+
+ok
+test scenario_4_deux_operations_independantes_contenu_identique ... 
+running 1 test
+test scenario_4_deux_operations_independantes_contenu_identique ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.05s
+
+
+running 1 test
+test scenario_4_deux_operations_independantes_contenu_identique ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.02s
+
+ok
+test scenario_5_deux_operations_meme_classe ... ok
+test scenario_6_collision_decision_id ... ok
+test scenario_7_tentative_etrangere_refusee ... ok
+test scenario_8_corruption_valide_k_generation ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+

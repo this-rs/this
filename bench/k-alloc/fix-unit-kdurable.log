@@ -1,0 +1,19 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-alloc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 58.53s
+     Running unittests src/lib.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/07b2fb65722a612b/out/this-07b2fb65722a612b)
+
+running 5 tests
+test autorite_k::tests::compteur_u128_durable_et_monotone ... ok
+test autorite_k::tests::corruption_refusee_pas_de_reinitialisation_silencieuse ... ok
+test autorite_k::tests::deux_instances_meme_processus_n_emettent_jamais_le_meme_k ... ok
+test autorite_k::tests::ordre_mesure_verrou_puis_lecture_puis_persistance_puis_publication ... ok
+test autorite_k::tests::saturation_refusee_sans_repli ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1360 filtered out; finished in 0.24s
+
+     Running tests/k_durable_autorite.rs (/Users/triviere/projects/this-rs/_wt-k-alloc-target/debug/build/this-rs/621f487418174a69/out/k_durable_autorite-621f487418174a69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
