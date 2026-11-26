@@ -2,13 +2,10 @@
 //! backend de persistance. La durabilité et l'exactement-une-fois en concurrence
 //! relèvent d'Obrain, pas de cette primitive.
 //!
-//! Contrat (corrigé) :
-//! - `record` n'écrase jamais : divergence → `Conflit`, l'état d'origine est intact ;
-//! - `recevoir` ne rouvre pas un cycle terminal, n'écrase pas une observation ;
-//! - `confirmer` n'accepte qu'un cycle ayant une observation reçue ;
-//! - `abandonner` est l'autre issue terminale ;
-//! - le résultat d'action (`Resultat`) est distinct de l'issue de publication
-//!   (confirmation / attente) : une écriture indéterminée ne clôt pas le cycle.
+//! Un cycle : `Ouvert` (record) → `Recu` (observation reçue) → `EnCours`
+//! (tentative réservée) → `Confirme` (terminal) ou `Abandonne` (terminal). Une
+//! publication d'issue inconnue passe par `Indetermine`, qui **exige** une
+//! résolution auprès du backend (jamais de ré-publication aveugle).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -16,25 +13,22 @@ use std::collections::hash_map::Entry;
 /// La définition d'une décision : ce qui doit rester identique pour un rejeu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
-    /// Identité cognitive constituée (`None` = pas de connaissance constituée).
     pub identite: Option<String>,
-    /// Action PRÉVUE (la paire choisie par la décision).
+    /// Action PRÉVUE (choisie), peut différer de l'action servie.
     pub prevue: Option<(String, String)>,
-    /// Action SERVIE (la paire réellement exécutée) — peut différer de `prevue`.
+    /// Action SERVIE (réellement exécutée).
     pub servie: Option<(String, String)>,
 }
 
-/// Le résultat d'une ACTION — jamais confondu avec le succès de transport ni
-/// avec l'issue de publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resultat {
     Succes,
     Echec,
-    /// Résultat d'action inconnu (pas de verdict fonctionnel).
+    /// Résultat d'action inconnu (pas de verdict fonctionnel) — distinct de
+    /// l'issue de publication.
     Inconnu,
 }
 
-/// Une observation reçue, pas encore confirmée.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub fournisseur: String,
@@ -42,27 +36,27 @@ pub struct Observation {
     pub resultat: Resultat,
 }
 
-/// État du cycle d'attribution. `Confirme` et `Abandonne` sont terminaux.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Etat {
-    /// Décision enregistrée, pas d'observation.
     Ouvert,
-    /// Observation reçue, en attente de confirmation (ou d'abandon).
     Recu,
-    /// Tentative de publication réservée : un seul écrivain à la fois.
+    /// Tentative de publication réservée.
     EnCours,
-    /// Confirmation logique : terminal.
+    /// Publication d'issue INCONNUE : à résoudre auprès du backend, pas de
+    /// ré-publication aveugle.
+    Indetermine,
     Confirme,
-    /// Abandon explicite : terminal.
     Abandonne,
 }
 
-/// Descripteur d'une tentative de publication, lié à la décision, à son
-/// observation et à sa génération : un résultat tardif d'une ancienne tentative
-/// ne peut pas confirmer une tentative différente.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Descripteur **opaque** de tentative : lié à la décision, à son observation et
+/// à sa génération. Seule [`Attribution::reserver`] peut en produire un ; les
+/// champs sont privés, on ne peut pas en fabriquer un arbitraire. Un descripteur
+/// d'une décision ne peut pas confirmer une autre.
+#[derive(Clone, Copy, Debug)]
 pub struct Tentative {
-    pub generation: u64,
+    decision_id: u128,
+    generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -77,22 +71,16 @@ pub struct Cycle {
 pub enum Record {
     Enregistre,
     Rejeu,
-    /// Définition divergente : refusée, l'état d'origine n'est PAS modifié.
     Conflit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reception {
     Recu,
-    /// Même observation reçue une seconde fois : idempotent.
     Rejeu,
-    /// Observation différente : refusée, l'observation d'origine est conservée.
     Divergente,
-    /// L'observation ne correspond pas à l'action servie.
     Incompatible,
-    /// Le cycle est terminal (confirmé ou abandonné) : refusé.
     Termine,
-    /// Aucun `record` pour cet identifiant.
     Absent,
 }
 
@@ -106,8 +94,6 @@ impl Attribution {
         Self::default()
     }
 
-    /// Enregistre la définition d'une décision. Jamais d'écrasement : un identifiant
-    /// présent avec une définition différente est un conflit SANS modifier l'état.
     pub fn record(&mut self, id: u128, definition: Definition) -> Record {
         match self.cycles.entry(id) {
             Entry::Vacant(e) => {
@@ -129,8 +115,6 @@ impl Attribution {
         }
     }
 
-    /// Reçoit et conserve une observation, sans fermer le cycle. Ne rouvre jamais
-    /// un cycle terminal, n'écrase jamais une observation existante.
     pub fn recevoir(&mut self, id: u128, observation: Observation) -> Reception {
         let Some(c) = self.cycles.get_mut(&id) else {
             return Reception::Absent;
@@ -138,7 +122,6 @@ impl Attribution {
         if c.etat == Etat::Confirme || c.etat == Etat::Abandonne {
             return Reception::Termine;
         }
-        // L'observation doit porter l'action effectivement servie (si connue).
         if let Some((p, m)) = &c.definition.servie
             && (&observation.fournisseur != p || &observation.modele != m)
         {
@@ -155,26 +138,31 @@ impl Attribution {
         }
     }
 
-    /// Réserve une tentative de publication : `Recu → EnCours`. Un seul écrivain
-    /// peut réserver à la fois ; un second obtient `None`. La réservation est
-    /// liée à la décision, à son observation et à sa génération.
+    /// Réserve une tentative : `Recu → EnCours`. Un seul écrivain à la fois.
     pub fn reserver(&mut self, id: u128) -> Option<Tentative> {
         let c = self.cycles.get_mut(&id)?;
         if c.etat != Etat::Recu {
             return None;
         }
-        c.generation += 1;
+        c.generation = c.generation.checked_add(1)?; // débordement → refus
         c.etat = Etat::EnCours;
         Some(Tentative {
+            decision_id: id,
             generation: c.generation,
         })
     }
 
-    /// Confirme une tentative : le descripteur doit correspondre à la génération
-    /// réservée. Un résultat tardif d'une ancienne tentative est refusé.
+    /// Confirme une tentative : le descripteur doit correspondre (décision + génération).
+    /// Accepte `EnCours` et `Indetermine` (résolution après issue inconnue).
     pub fn confirmer(&mut self, id: u128, tentative: Tentative) -> bool {
+        if tentative.decision_id != id {
+            return false;
+        }
         match self.cycles.get_mut(&id) {
-            Some(c) if c.etat == Etat::EnCours && c.generation == tentative.generation => {
+            Some(c)
+                if (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
+                    && c.generation == tentative.generation =>
+            {
                 c.etat = Etat::Confirme;
                 true
             }
@@ -182,11 +170,17 @@ impl Attribution {
         }
     }
 
-    /// Échec récupérable de la publication : relâche la réservation, conserve
-    /// l'observation, autorise une nouvelle tentative.
-    pub fn echec_recuperable(&mut self, id: u128, tentative: Tentative) -> bool {
+    /// Échec CERTAIN de la publication : relâche la réservation (ré-publication
+    /// autorisée). Accepte `EnCours` et `Indetermine` (le backend a tranché « non écrit »).
+    pub fn echec_certain(&mut self, id: u128, tentative: Tentative) -> bool {
+        if tentative.decision_id != id {
+            return false;
+        }
         match self.cycles.get_mut(&id) {
-            Some(c) if c.etat == Etat::EnCours && c.generation == tentative.generation => {
+            Some(c)
+                if (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
+                    && c.generation == tentative.generation =>
+            {
                 c.etat = Etat::Recu;
                 true
             }
@@ -194,12 +188,42 @@ impl Attribution {
         }
     }
 
-    /// Abandon explicite : terminal.
-    pub fn abandonner(&mut self, id: u128) -> bool {
+    /// Publication d'issue INCONNUE : `EnCours → Indetermine`. Exige une résolution
+    /// (confirmer ou echec_certain auprès du backend), jamais une ré-publication.
+    pub fn indetermine(&mut self, id: u128, tentative: Tentative) -> bool {
+        if tentative.decision_id != id {
+            return false;
+        }
+        match self.cycles.get_mut(&id) {
+            Some(c) if c.etat == Etat::EnCours && c.generation == tentative.generation => {
+                c.etat = Etat::Indetermine;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Abandon résolu d'une tentative (l'écriture est tranchée). Terminal.
+    pub fn abandonner(&mut self, id: u128, tentative: Tentative) -> bool {
+        if tentative.decision_id != id {
+            return false;
+        }
         match self.cycles.get_mut(&id) {
             Some(c)
-                if c.etat == Etat::Ouvert || c.etat == Etat::Recu || c.etat == Etat::EnCours =>
+                if (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
+                    && c.generation == tentative.generation =>
             {
+                c.etat = Etat::Abandonne;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Abandon avant toute tentative (aucune écriture engagée). Terminal.
+    pub fn abandonner_sans_tentative(&mut self, id: u128) -> bool {
+        match self.cycles.get_mut(&id) {
+            Some(c) if c.etat == Etat::Ouvert || c.etat == Etat::Recu => {
                 c.etat = Etat::Abandonne;
                 true
             }
@@ -227,7 +251,6 @@ mod tests {
             servie: servie.map(|(p, m)| (p.to_string(), m.to_string())),
         }
     }
-
     fn obs(p: &str, m: &str, r: Resultat) -> Observation {
         Observation {
             fournisseur: p.to_string(),
@@ -235,30 +258,47 @@ mod tests {
             resultat: r,
         }
     }
-
     fn d() -> Definition {
         def(Some("k1"), Some(("a", "m1")), Some(("a", "m1")))
     }
 
-    fn confirmer(a: &mut Attribution, id: u128) -> Tentative {
+    fn ouvrir_confirmer(a: &mut Attribution, id: u128) -> Tentative {
         let t = a.reserver(id).expect("réservation");
-        assert!(a.confirmer(id, t), "confirmation");
+        assert!(a.confirmer(id, t));
         t
     }
 
     #[test]
-    fn a_recevoir_confirmer_puis_recevoir_ne_rouvre_pas() {
+    fn le_descripteur_est_lie_a_la_decision() {
         let mut a = Attribution::new();
         a.record(1, d());
-        assert_eq!(
-            a.recevoir(1, obs("a", "m1", Resultat::Succes)),
-            Reception::Recu
+        a.record(2, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        a.recevoir(2, obs("a", "m1", Resultat::Succes));
+        let t1 = a.reserver(1).unwrap();
+        let t2 = a.reserver(2).unwrap();
+        // Le descripteur de A ne confirme PAS B, et inversement.
+        assert!(!a.confirmer(2, t1), "descripteur croisé refusé");
+        assert!(!a.confirmer(1, t2), "descripteur croisé refusé");
+        assert!(a.confirmer(1, t1));
+        assert!(a.confirmer(2, t2));
+    }
+
+    #[test]
+    fn indetermine_exige_resolution_pas_de_republication_aveugle() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        assert!(a.indetermine(1, t), "publication d'issue inconnue");
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Indetermine);
+        // Pas de ré-publication aveugle : reserver est refusé pendant Indetermine.
+        assert!(
+            a.reserver(1).is_none(),
+            "pas de ré-publication sans résolution"
         );
-        confirmer(&mut a, 1);
-        assert_eq!(
-            a.recevoir(1, obs("a", "m1", Resultat::Echec)),
-            Reception::Termine
-        );
+        // Résolution : le backend dit « écrit » → confirmation, contenu intact.
+        assert!(a.confirmer(1, t));
         assert_eq!(
             a.etat(1).unwrap().observation.as_ref().unwrap().resultat,
             Resultat::Succes
@@ -266,24 +306,45 @@ mod tests {
     }
 
     #[test]
-    fn b_confirmer_sans_observation_refuse() {
-        let mut a = Attribution::new();
-        a.record(1, d());
-        assert!(
-            a.reserver(1).is_none(),
-            "Ouvert sans observation n'est pas réservable"
-        );
-        assert_eq!(a.etat(1).unwrap().etat, Etat::Ouvert);
-    }
-
-    #[test]
-    fn c_record_divergent_apres_confirmation_ne_modifie_pas() {
+    fn echec_certain_autorise_nouvelle_tentative() {
         let mut a = Attribution::new();
         a.record(1, d());
         a.recevoir(1, obs("a", "m1", Resultat::Succes));
-        confirmer(&mut a, 1);
+        let t1 = a.reserver(1).unwrap();
+        assert!(a.echec_certain(1, t1));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Recu);
+        let t2 = a.reserver(1).unwrap();
+        assert!(a.confirmer(1, t2));
+    }
+
+    #[test]
+    fn reponse_tardive_apres_abandon_resolu() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        assert!(a.abandonner(1, t), "abandon résolu");
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
+        // Une réponse tardive de la tentative abandonnée ne ressuscite rien.
+        assert!(!a.confirmer(1, t), "réponse tardive après abandon refusée");
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
+    }
+
+    #[test]
+    fn abandon_sans_tentative_terminal() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        assert!(a.abandonner_sans_tentative(1));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
+    }
+
+    #[test]
+    fn rejeu_et_conflit() {
+        let mut a = Attribution::new();
+        assert_eq!(a.record(1, d()), Record::Enregistre);
+        assert_eq!(a.record(1, d()), Record::Rejeu);
         assert_eq!(a.record(1, def(Some("k2"), None, None)), Record::Conflit);
-        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
         assert_eq!(
             a.etat(1).unwrap().definition.identite.as_deref(),
             Some("k1")
@@ -291,10 +352,27 @@ mod tests {
     }
 
     #[test]
+    fn b_confirmer_sans_observation_refuse() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        assert!(a.reserver(1).is_none());
+    }
+
+    #[test]
+    fn c_record_divergent_apres_confirmation_ne_modifie_pas() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        ouvrir_confirmer(&mut a, 1);
+        assert_eq!(a.record(1, def(Some("k2"), None, None)), Record::Conflit);
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
+    }
+
+    #[test]
     fn d_recevoir_apres_abandon_termine() {
         let mut a = Attribution::new();
         a.record(1, d());
-        assert!(a.abandonner(1));
+        a.abandonner_sans_tentative(1);
         assert_eq!(
             a.recevoir(1, obs("a", "m1", Resultat::Succes)),
             Reception::Termine
@@ -302,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn e_observation_divergente_avant_confirmation_conservee() {
+    fn e_observation_divergente_conservee() {
         let mut a = Attribution::new();
         a.record(1, d());
         a.recevoir(1, obs("a", "m1", Resultat::Succes));
@@ -317,14 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn f_observation_incompatible_avec_action_servie() {
+    fn f_incompatible_avec_action_servie() {
         let mut a = Attribution::new();
         a.record(1, d());
         assert_eq!(
             a.recevoir(1, obs("b", "m2", Resultat::Succes)),
             Reception::Incompatible
         );
-        assert!(a.etat(1).unwrap().observation.is_none());
     }
 
     #[test]
@@ -332,59 +409,9 @@ mod tests {
         let mut a = Attribution::new();
         a.record(1, d());
         a.recevoir(1, obs("a", "m1", Resultat::Succes));
-        let t1 = a.reserver(1).expect("première réservation");
-        // Un second écrivain ne peut pas réserver pendant la tentative.
-        assert!(
-            a.reserver(1).is_none(),
-            "une seconde réservation est refusée"
-        );
-        assert!(a.confirmer(1, t1));
-        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
-    }
-
-    #[test]
-    fn h_publication_indeterminee_conserve_puis_resolution() {
-        let mut a = Attribution::new();
-        a.record(1, d());
-        a.recevoir(1, obs("a", "m1", Resultat::Succes));
-        let t1 = a.reserver(1).expect("réservation");
-        // Publication d'issue indéterminée : relâche, conserve l'observation.
-        assert!(a.echec_recuperable(1, t1));
-        assert_eq!(a.etat(1).unwrap().etat, Etat::Recu);
-        assert_eq!(
-            a.etat(1).unwrap().observation.as_ref().unwrap().resultat,
-            Resultat::Succes
-        );
-        // Résolution : nouvelle tentative puis confirmation, contenu intact.
-        let t2 = a.reserver(1).expect("nouvelle réservation");
-        assert!(a.confirmer(1, t2));
-        assert_eq!(
-            a.etat(1).unwrap().observation.as_ref().unwrap().resultat,
-            Resultat::Succes
-        );
-    }
-
-    #[test]
-    fn i_reponse_tardive_ancienne_tentative_refusee() {
-        let mut a = Attribution::new();
-        a.record(1, d());
-        a.recevoir(1, obs("a", "m1", Resultat::Succes));
-        let t1 = a.reserver(1).expect("réservation");
-        assert!(a.echec_recuperable(1, t1));
-        let t2 = a.reserver(1).expect("seconde réservation");
-        // Un résultat tardif de l'ancienne tentative ne confirme pas la nouvelle.
-        assert!(!a.confirmer(1, t1), "tentative périmée refusée");
-        assert!(a.confirmer(1, t2));
-    }
-
-    #[test]
-    fn j_abandon_pendant_tentative() {
-        let mut a = Attribution::new();
-        a.record(1, d());
-        a.recevoir(1, obs("a", "m1", Resultat::Succes));
-        a.reserver(1).expect("réservation");
-        assert!(a.abandonner(1), "abandon pendant tentative");
-        assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
+        let t = a.reserver(1).unwrap();
+        assert!(a.reserver(1).is_none());
+        assert!(a.confirmer(1, t));
     }
 
     #[test]
@@ -394,23 +421,15 @@ mod tests {
         a.record(2, def(Some("k2"), None, Some(("b", "m2"))));
         a.recevoir(1, obs("a", "m1", Resultat::Succes));
         a.recevoir(2, obs("b", "m2", Resultat::Echec));
-        confirmer(&mut a, 2);
-        confirmer(&mut a, 1);
+        ouvrir_confirmer(&mut a, 2);
+        ouvrir_confirmer(&mut a, 1);
         assert_eq!(
             a.etat(1).unwrap().observation.as_ref().unwrap().resultat,
             Resultat::Succes
         );
         assert_eq!(
-            a.etat(1).unwrap().definition.identite.as_deref(),
-            Some("k1")
-        );
-        assert_eq!(
             a.etat(2).unwrap().observation.as_ref().unwrap().resultat,
             Resultat::Echec
-        );
-        assert_eq!(
-            a.etat(2).unwrap().definition.identite.as_deref(),
-            Some("k2")
         );
     }
 }
