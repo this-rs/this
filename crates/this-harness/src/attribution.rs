@@ -242,24 +242,10 @@ impl Attribution {
         }
     }
 
-    /// Abandon résolu d'une tentative (l'écriture est tranchée). Terminal.
-    pub fn abandonner(&mut self, id: u128, tentative: Tentative) -> bool {
-        if !self.descripteur_valide(id, &tentative) {
-            return false;
-        }
-        match self.cycles.get_mut(&id) {
-            Some(c)
-                if (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
-                    && c.generation == tentative.generation =>
-            {
-                c.etat = Etat::Abandonne;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Abandon avant toute tentative (aucune écriture engagée). Terminal.
+    /// Abandon AVANT toute tentative (aucune écriture engagée). Terminal.
+    /// Un abandon d'une tentative en cours ou indéterminée exige d'abord la
+    /// résolution (`resoudre` avec `AbsenceDefinitive`) : une transition RAM ne
+    /// peut pas masquer un effet externe déjà engagé.
     pub fn abandonner_sans_tentative(&mut self, id: u128) -> bool {
         match self.cycles.get_mut(&id) {
             Some(c) if c.etat == Etat::Ouvert || c.etat == Etat::Recu => {
@@ -270,7 +256,9 @@ impl Attribution {
         }
     }
 
-    /// Résout une publication indéterminée selon le verdict du backend.
+    /// Résout une publication indéterminée selon le verdict du backend. Toute
+    /// variante valide d'abord la tentative (autorité + décision + génération) et
+    /// l'état du cycle — aucune ne répond positivement à une tentative étrangère.
     pub fn resoudre(
         &mut self,
         id: u128,
@@ -280,7 +268,15 @@ impl Attribution {
         match resolution {
             RésolutionBackend::EffetConfirme => self.confirmer(id, tentative),
             RésolutionBackend::AbsenceDefinitive => self.echec_certain(id, tentative),
-            RésolutionBackend::Indetermine => true, // reste Indetermine
+            RésolutionBackend::Indetermine => {
+                if !self.descripteur_valide(id, &tentative) {
+                    return false;
+                }
+                matches!(
+                    self.cycles.get(&id).map(|c| &c.etat),
+                    Some(Etat::EnCours) | Some(Etat::Indetermine)
+                )
+            }
             RésolutionBackend::Incompatible => {
                 if !self.descripteur_valide(id, &tentative) {
                     return false;
@@ -399,7 +395,14 @@ mod tests {
         a.record(1, d());
         a.recevoir(1, obs("a", "m1", Resultat::Succes));
         let t = a.reserver(1).unwrap();
-        assert!(a.abandonner(1, t), "abandon résolu");
+        // Abandon d'une tentative engagée : exige la résolution (absence définitive),
+        // puis l'abandon sans tentative. Pas de transition directe EnCours → Abandonne.
+        assert!(
+            !a.abandonner_sans_tentative(1),
+            "pas d'abandon direct pendant EnCours"
+        );
+        assert!(a.resoudre(1, t, RésolutionBackend::AbsenceDefinitive));
+        assert!(a.abandonner_sans_tentative(1));
         assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
         // Une réponse tardive de la tentative abandonnée ne ressuscite rien.
         assert!(!a.confirmer(1, t), "réponse tardive après abandon refusée");
@@ -565,5 +568,48 @@ mod tests {
             a.etat(1).unwrap().observation.is_some(),
             "l'effet reste observable"
         );
+    }
+    #[test]
+    fn resoudre_indetermine_avec_tentative_etrangere_refuse() {
+        let mut a = Attribution::new();
+        let mut b = Attribution::new();
+        a.record(1, d());
+        b.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        b.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let ta = a.reserver(1).unwrap();
+        let _tb = b.reserver(1).unwrap();
+        a.indetermine(1, ta);
+        // Une résolution Indetermine avec une tentative étrangère est REFUSÉE
+        // (aucune variante ne contourne la validation commune).
+        assert!(!a.resoudre(
+            1,
+            Tentative {
+                autorite: 999,
+                decision_id: 1,
+                generation: 1
+            },
+            RésolutionBackend::Indetermine
+        ));
+        assert!(a.resoudre(1, ta, RésolutionBackend::Indetermine));
+    }
+
+    #[test]
+    fn abandon_direct_pendant_indetermine_refuse() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        a.indetermine(1, t);
+        // Pas d'abandon direct pendant Indetermine : il faut résoudre d'abord.
+        assert!(
+            !a.abandonner_sans_tentative(1),
+            "abandon direct refusé pendant Indetermine"
+        );
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Indetermine);
+        // Résolution → absence définitive → abandon sans tentative.
+        assert!(a.resoudre(1, t, RésolutionBackend::AbsenceDefinitive));
+        assert!(a.abandonner_sans_tentative(1));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
     }
 }
