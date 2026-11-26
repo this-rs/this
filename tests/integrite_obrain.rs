@@ -164,7 +164,7 @@ struct Apprenant {
     seuil: f32,
     quantification: u32,
     /// Le cycle logique d'attribution (RAM) : `record` / `recevoir` / `reserver`
-    /// / `confirmer` / `echec_recuperable`. La durabilité est la responsabilité
+    /// / `confirmer` / `echec_certain` / `indetermine` / `resoudre`. La durabilité est la responsabilité
     /// d'Obrain, pas de cette primitive.
     attribution: Mutex<Attribution>,
     compteurs: Mutex<Compteurs>,
@@ -449,8 +449,13 @@ impl Apprenant {
             Ecriture::Creee | Ecriture::RejeuIdentique | Ecriture::Conflit => {
                 attr.confirmer(id, tentative);
             }
-            Ecriture::Indetermine | Ecriture::Erreur => {
-                attr.echec_recuperable(id, tentative);
+            Ecriture::Erreur => {
+                // Échec CERTAIN : ré-publication autorisée.
+                attr.echec_certain(id, tentative);
+            }
+            Ecriture::Indetermine => {
+                // Issue INCONNUE : exige une résolution, jamais une ré-publication.
+                attr.indetermine(id, tentative);
             }
         }
     }
@@ -974,9 +979,15 @@ fn resultat_indetermine_n_est_pas_un_effet_confirme() {
     assert_eq!(c.creees, 0, "l'indétermination n'est pas une création");
     assert_eq!(c.indetermines, 1, "…mais elle est nommée");
 
-    // La lecture est rétablie : la même publication passe, une seule fois.
+    // La lecture est rétablie : SANS résolution explicite, une publication
+    // indéterminée ne se rejoue pas (le cycle reste Indetermine, en attente du
+    // verdict du backend — pas de ré-publication aveugle).
     executer(apprenant.settle(dec.id, Some(&pick), &Stop::Done, None));
-    assert_eq!(apprenant.compter_observations(), 1);
+    assert_eq!(
+        apprenant.compter_observations(),
+        0,
+        "pas de ré-publication aveugle sans résolution"
+    );
 
     store.commit_wal().expect("flush");
     drop(routeur);
