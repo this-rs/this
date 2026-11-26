@@ -43,6 +43,14 @@ pub struct EnregistrementOriginal {
     pub backend: u64,
     /// Génération de tentative G.
     pub generation: u64,
+    /// Identifiant de décision (decision_id) — distinct de K : K est l'identité
+    /// LOGIQUE stable entre tentatives, decision_id est l'identifiant physique
+    /// du tour. Sa durabilité (unicité + stabilité après redémarrage) relève du
+    /// contrat du consommateur, pas de ce codec.
+    pub decision_id: u128,
+    /// Autorité CONSOMMATEUR (l'instance d'`Attribution` qui a réservé), distincte
+    /// de l'autorité BACKEND (writer_id) portée par la référence.
+    pub autorite_consommateur: u64,
     /// Cible originale.
     pub cible: NodeId,
     /// Effets attendus (clé + contenu) — fournis par le consommateur, PAS une constante.
@@ -124,6 +132,19 @@ fn lire_u64_le(o: &[u8], pos: &mut usize) -> Result<u64, DecodageEnregistrement>
     Ok(u64::from_le_bytes(b))
 }
 
+fn lire_u128_le(o: &[u8], pos: &mut usize) -> Result<u128, DecodageEnregistrement> {
+    let fin = pos
+        .checked_add(16)
+        .ok_or_else(|| DecodageEnregistrement::Malforme("dépassement u128".into()))?;
+    let t = o
+        .get(*pos..fin)
+        .ok_or_else(|| DecodageEnregistrement::Malforme("troncature u128".into()))?;
+    *pos = fin;
+    let mut b = [0u8; 16];
+    b.copy_from_slice(t);
+    Ok(u128::from_le_bytes(b))
+}
+
 fn lire_chaine(o: &[u8], pos: &mut usize) -> Result<String, DecodageEnregistrement> {
     let n = lire_u32_le(o, pos)? as usize;
     let fin = pos
@@ -137,6 +158,23 @@ fn lire_chaine(o: &[u8], pos: &mut usize) -> Result<String, DecodageEnregistreme
 }
 
 impl EnregistrementOriginal {
+    /// Liaison effective à la décision et à la réservation RÉELLES : vérifie que
+    /// `generation`, `decision_id` et `autorite_consommateur` de l'enregistrement
+    /// correspondent au descripteur de tentative et à l'instance qui l'a produit.
+    /// K n'est PAS lisible dans la référence : sa cohérence (même K entre les
+    /// tentatives d'une même opération, K distinct entre opérations indépendantes)
+    /// est le contrat du CONSOMMATEUR, vérifié par l'appelant, pas ici.
+    pub fn verifier_liaison(
+        &self,
+        tentative: &this_harness::attribution::Tentative,
+        autorite_consommateur: u64,
+    ) -> bool {
+        self.generation == tentative.generation()
+            && self.decision_id == tentative.decision_id()
+            && self.autorite_consommateur == autorite_consommateur
+            && !self.k.is_empty()
+    }
+
     /// Encodage versionné en un SEUL bloc cohérent :
     /// `magic(4) | version(4) | k_len(4)+k | backend(8) | generation(8) | cible(8) |
     /// n_effets(4) | [k_len(4)+k | valeur(8)]*n | ref_len(8) | reference_bytes`.
@@ -148,6 +186,8 @@ impl EnregistrementOriginal {
         out.extend_from_slice(self.k.as_bytes());
         out.extend_from_slice(&self.backend.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
+        out.extend_from_slice(&self.decision_id.to_le_bytes());
+        out.extend_from_slice(&self.autorite_consommateur.to_le_bytes());
         out.extend_from_slice(&self.cible.0.to_le_bytes());
         out.extend_from_slice(&(self.effets_attendus.len() as u32).to_le_bytes());
         for (cle, val) in &self.effets_attendus {
@@ -177,6 +217,8 @@ impl EnregistrementOriginal {
         let k = lire_chaine(octets, &mut pos)?;
         let backend = lire_u64_le(octets, &mut pos)?;
         let generation = lire_u64_le(octets, &mut pos)?;
+        let decision_id = lire_u128_le(octets, &mut pos)?;
+        let autorite_consommateur = lire_u64_le(octets, &mut pos)?;
         let cible = NodeId(lire_u64_le(octets, &mut pos)?);
         let n = lire_u32_le(octets, &mut pos)? as usize;
         let mut effets_attendus = Vec::with_capacity(n);
@@ -202,6 +244,8 @@ impl EnregistrementOriginal {
             k,
             backend,
             generation,
+            decision_id,
+            autorite_consommateur,
             cible,
             effets_attendus,
             reference_bytes,

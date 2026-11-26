@@ -68,6 +68,8 @@ fn reconcilier(
         k: "op-cycle".to_string(),
         backend: reference.auteur(),
         generation: 1,
+        decision_id: 0,
+        autorite_consommateur: 0,
         cible: reference.cible(),
         effets_attendus: effets.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         reference_bytes: reference.to_bytes(),
@@ -133,6 +135,8 @@ fn h3_v2_cycle_harness_reel_nominal() {
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1, // première réservation du cycle (reserver → génération 1)
+            decision_id,
+            autorite_consommateur: attr.autorite(),
             cible: id,
             effets_attendus: vec![("a".to_string(), 10)],
             reference_bytes: reference_bytes.clone(),
@@ -153,6 +157,11 @@ fn h3_v2_cycle_harness_reel_nominal() {
     // 7. RÉCONCILIATION contre l'enregistrement constitué AVANT publication
     //    (pas reconstruit depuis la référence résolue).
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
+    // Liaison effective : l'enregistrement est confronté à la réservation RÉELLE.
+    assert!(
+        enr.verifier_liaison(&tentative, attr.autorite()),
+        "K/génération/decision_id/autorité consommateur conformes à la réservation"
+    );
     let verdict = reconcilier_composant(&enr, &reference, &res, &store2)
         .vers_backend()
         .expect("verdict non ambigu");
