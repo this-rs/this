@@ -16,10 +16,16 @@ use async_trait::async_trait;
 use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
+use this_harness::cognition::{Classification, LearnedClass, TaskRepr, Uncertainty};
 use this_harness::routing::{
     ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick, PriorHints,
     RouteWhy, RouterSpec, RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
+
+/// La classe cognitive de cette expérience : une seule classe de laboratoire,
+/// nommée explicitement (pas de catégorie lexicale). `classify` la rend, et
+/// `record`/`settle` attribuent les observations à elle via `Decision::class_key()`.
+const CLASSE_L3: &str = "repr.experience-l3";
 
 fn executer<F: std::future::Future<Output = T>, T>(f: F) -> T {
     futures::executor::block_on(f)
@@ -325,6 +331,18 @@ impl ApprisObrain {
 
 #[async_trait(?Send)]
 impl Learning for ApprisObrain {
+    async fn classify(&self, _repr: &TaskRepr) -> Classification {
+        // Laboratoire à classe unique : une représentation synthétique, sans
+        // encodeur ni dictionnaire. La classe est une identité EXPLICITE.
+        Classification {
+            class: Some(LearnedClass(CLASSE_L3.to_string())),
+            formation: None,
+            uncertainty: Uncertainty::Established(1.0),
+            nearest: Some(LearnedClass(CLASSE_L3.to_string())),
+            similarity: Some(1.0),
+        }
+    }
+
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
         // Parité avec L2 : TOUS les candidats sont présents, à l'a priori neutre 1/1
         // s'ils n'ont pas encore été observés. `fresh` met `n = 0` : on restaure le
@@ -480,7 +498,7 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
                 if premiere.is_none() && dec.applied {
                     premiere = Some((
                         dec.id.to_string(),
-                        dec.signature.arm_key(),
+                        dec.class_key().unwrap_or_default(),
                         used.provider_id.clone(),
                         used.model.clone(),
                         ok,
@@ -624,6 +642,18 @@ impl ApprisMemoire {
 
 #[async_trait(?Send)]
 impl Learning for ApprisMemoire {
+    async fn classify(&self, _repr: &TaskRepr) -> Classification {
+        // Même classe explicite que `ApprisObrain` : la parité L2/L3 exige des
+        // conditions identiques.
+        Classification {
+            class: Some(LearnedClass(CLASSE_L3.to_string())),
+            formation: None,
+            uncertainty: Uncertainty::Established(1.0),
+            nearest: Some(LearnedClass(CLASSE_L3.to_string())),
+            similarity: Some(1.0),
+        }
+    }
+
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
         let m = self.bras.lock().unwrap();
         self.candidats
