@@ -1,0 +1,39 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-obrr-main)
+error[E0432]: unresolved imports `obrain_substrate::IntegriteTentative`, `obrain_substrate::ReferenceTentative`, `obrain_substrate::ResolutionTentative`
+  --> src/reconciliation.rs:26:5
+   |
+26 |     IntegriteTentative, ReferenceTentative, ResolutionTentative, SubstrateStore,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^ no `ResolutionTentative` in the root
+   |     |                   |
+   |     |                   no `ReferenceTentative` in the root
+   |     no `IntegriteTentative` in the root
+
+error[E0599]: no method named `generation` found for reference `&Tentative` in the current scope
+   --> src/reconciliation.rs:175:38
+    |
+175 |         self.generation == tentative.generation()
+    |                                      ^^^^^^^^^^ private field, not a method
+
+error[E0599]: no method named `decision_id` found for reference `&Tentative` in the current scope
+   --> src/reconciliation.rs:176:46
+    |
+176 |             && self.decision_id == tentative.decision_id()
+    |                                              ^^^^^^^^^^^ private field, not a method
+
+error[E0599]: no method named `autorite` found for reference `&Tentative` in the current scope
+   --> src/reconciliation.rs:177:56
+    |
+177 |             && self.autorite_consommateur == tentative.autorite()
+    |                                                        ^^^^^^^^ private field, not a method
+
+error[E0599]: no method named `resoudre_reference` found for reference `&SubstrateStore` in the current scope
+   --> src/reconciliation.rs:828:14
+    |
+827 |         let res = store
+828 |             .resoudre_reference(&reference)
+    |              ^^^^^^^^^^^^^^^^^^ method not found in `&SubstrateStore`
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `this-rs` (lib) due to 5 previous errors
+EXIT=101
