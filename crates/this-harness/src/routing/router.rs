@@ -975,6 +975,15 @@ impl TurnRouter {
             .iter()
             .any(|a| a.rejected.is_none() && same_pair(&a.pick, &current));
 
+        // L'identité cognitive est portée par la décision DÈS sa construction, avant
+        // toute branche de sortie. Sans cela, les branches qui rendent la décision
+        // TELLE QUELLE — consultatif (`!turn.honored`) et dépassé (`Superseded`) —
+        // gardent la clé de LECTURE des bras (`repr.unknown`, posée par `decide_free`
+        // depuis `DecideRequest::class_key`) comme identité d'attribution, alors que
+        // `Decision::class_key()` promet `None` quand aucune connaissance n'est
+        // constituée. `None` = `record` n'attribue rien.
+        decision.cognitive_class = class.clone();
+
         let (why, apply) = self.verdict(
             &decision,
             &current,
@@ -1058,10 +1067,6 @@ impl TurnRouter {
                 decision.applied = apply
                     && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
                 decision.used = used;
-                // L'identité cognitive de l'attribution : `None` quand aucune
-                // connaissance n'est constituée (routage neutre, aucune observation
-                // n'est attribuée à une classe commune).
-                decision.cognitive_class = class.clone();
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed,
