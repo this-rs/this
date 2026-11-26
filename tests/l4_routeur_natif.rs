@@ -181,7 +181,7 @@ fn tirage(classe: &str, provider: &str, j: usize, graine: u64) -> bool {
     // Le tirage est indexé par la POSITION de l'identité dans `TEXTES`, pas par
     // son nom : renommer `repr.c0` → autre chose ne change pas les résultats
     // latents (indépendants du nom et de la stratégie évaluée).
-    let idx = TEXTES.iter().position(|(c, _)| c == classe).unwrap_or(0);
+    let idx = TEXTES.iter().position(|(c, _)| *c == classe).unwrap_or(0);
     let mut etat = fnv1a(&format!("{graine}/{idx}/{provider}"));
     for _ in 0..=j {
         lcg(&mut etat);
