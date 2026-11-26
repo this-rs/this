@@ -1,0 +1,6 @@
+# Verdict — composant réutilisable + suite H3 (obrain 89d169d7)
+commit = 1724450eb706473729047821d66edf27b5f5e890
+sha256(Cargo.lock) = 3eb6502836f7fefe898bbe8b02fd43b4ceebb61fc683a49a4ca62b93dd49fe5e
+obrain = 89d169d7d481c59018b712d499b8180c384fd405
+suites = h3_v2_cycle_harness 5 | h3_v2_chaine_autorite 7 | reconciliation_composant 2 = 14 passed, 0 failed
+commande = cargo test --features obrain --test h3_v2_cycle_harness --test h3_v2_chaine_autorite --test reconciliation_composant (EXIT=0)
