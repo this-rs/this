@@ -135,7 +135,7 @@ fn effectuer_operation(
     let reference = prep.reference_tentative();
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: k,
+        k,
         domaine: "k-durable-test".to_string(),
         ecrivain: reference.auteur(),
         generation: tentative.generation(),
@@ -315,7 +315,7 @@ fn scenario_2_nouvelle_tentative_apres_refus_certain() {
     // Le K est le même d'une tentative à l'autre, la génération distingue les tentatives.
     let enr1 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: k,
+        k,
         domaine: "k-durable-test".to_string(),
         ecrivain: 7,
         generation: t1.generation(),
@@ -327,7 +327,7 @@ fn scenario_2_nouvelle_tentative_apres_refus_certain() {
     };
     let enr2 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: k,
+        k,
         domaine: "k-durable-test".to_string(),
         ecrivain: 7,
         generation: t2.generation(),

@@ -522,12 +522,21 @@ fn obrr_v1_string_jamais_reinterprete_en_u128() {
         Err(DecodageEnregistrement::VersionInconnue(1))
     ));
 
-    // Contrôle POSITIF : un V2 portant K = 7 est, lui, courant — même valeur
-    // logique, deux encodages, et le legacy n'est jamais promu.
+    // Contrôle POSITIF : un record du format COURANT portant K = 7 est, lui,
+    // admissible — même valeur logique, deux encodages, et le legacy n'est
+    // jamais promu.
+    //
+    // RÉSOLUTION DE CONFLIT (consolidation A/B/D/K) : ce champ s'appelait
+    // `backend` dans le codec V2 sur lequel ce témoin a été écrit. Le codec qui
+    // SURVIT est celui de A/B/D (`ENREGISTREMENT_VERSION = 5`) : l'identité de
+    // base est `domaine` (hors-bande, non vérifiable depuis la référence) et
+    // l'écrivain est `ecrivain`. Les deux grandeurs restent DISTINCTES — c'est
+    // la raison même du renommage. L'assertion est inchangée : K = 7.
     let v2 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: 7,
-        backend: 7,
+        domaine: "k-alloc-test".to_string(),
+        ecrivain: 7,
         generation: 1,
         decision_id: 1,
         autorite_consommateur: 1,
@@ -535,7 +544,7 @@ fn obrr_v1_string_jamais_reinterprete_en_u128() {
         effets_attendus: vec![],
         reference_bytes: vec![],
     };
-    match qualifier(&v2.encoder(), "test") {
+    match qualifier(&v2.encoder().expect("encodage du record courant"), "test") {
         EtatEnregistrement::Courant(enr) => assert_eq!(enr.k, 7, "K u128 du format courant"),
         autre => panic!("un V2 admissible doit être courant : {autre:?}"),
     }
@@ -551,7 +560,7 @@ fn obrr_v1_string_jamais_reinterprete_en_u128() {
     );
 
     // Le refus nommé existe pour les corruptions V2 (contrôle négatif).
-    let mut corrompu = v2.encoder();
+    let mut corrompu = v2.encoder().expect("encodage du record courant");
     corrompu[4] = 99;
     assert!(matches!(
         qualifier(&corrompu, "test").refus(),

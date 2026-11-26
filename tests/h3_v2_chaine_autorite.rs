@@ -10,6 +10,7 @@
 //!     amputée d'une clé rend `Integrale` sur une tentative incomplète.
 //!   - L2 : une substitution par une AUTRE référence authentique rend
 //!     `Integrale`/`Engage` ; seule la comparaison à l'enregistrement la détecte.
+//!
 //! La chaîne d'autorité ci-dessous les détecte toutes deux.
 
 #![cfg(feature = "obrain")]
