@@ -891,6 +891,28 @@ jobs:
           # `::` en fin de scalaire simple fait de la ligne une clé pour YAML : bloc.
           cargo test -p this-rs --features obrain --lib storage::
 
+      # La lacune CI mesurée le 26/11/2026 (lot E) : les 4 cibles de cognition
+      # l3_persistance / l3_routeur / l4_routeur_natif / l4_transfert_relationnel
+      # portent `#![cfg(all(feature = "obrain", feature = "objects-toolbox"))]`.
+      # Aucun job ne les exécutait avec les DEUX features à la fois : le `--features
+      # obrain` ci-dessus ne lève que la moitié du garde, et `--lib storage::`
+      # n'exécute aucune cible `--test`. Ces 10 tests — le seul témoin du cycle réel
+      # L2/L3/L4a (`classify → arms → scorer`) — ne tournaient donc NULLE PART ; une
+      # régression y serait restée invisible. Ils s'exécutent ici, in-process contre
+      # le vrai store embarqué, comme le veut le contrat du backend.
+      - name: Test the L3/L4 cognition targets (obrain + objects-toolbox)
+        run: |
+          # `--test-threads=1` : le store obrain est à bail d'écriture unique par
+          # processus — deux ouvertures en écriture dans le même processus sont
+          # refusées par le moteur. Sérialiser évite toute flakiness entre cibles.
+          # Mesuré localement : 10/10 verts, L4a ≈ 693 s.
+          cargo test -p this-rs --features obrain,objects-toolbox \
+            --test l3_persistance \
+            --test l3_routeur \
+            --test l4_routeur_natif \
+            --test l4_transfert_relationnel \
+            -- --test-threads=1
+
   frontend:
     # Skipped when the change is documentation-only (see `changes`).
     needs: changes
