@@ -1,0 +1,10 @@
+# Empreinte de reproductibilité — H3 native @ obrain 8918879e (commit af53c2f9)
+sha256(Cargo.lock) = fb81cbadc32ff3a658f300675b32ae970408c13d2429637281e7c672f014ea73
+date = 2026-11-26T11:19:46Z
+obrain rev = 8918879e4e7d5efb05befa52d4003cf4bad5b0e2
+name = "obrain-adapters"
+name = "obrain-common"
+name = "obrain-core"
+name = "obrain-engine"
+name = "obrain-reactive"
+name = "obrain-substrate"
