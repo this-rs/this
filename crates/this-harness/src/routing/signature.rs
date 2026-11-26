@@ -57,75 +57,6 @@ impl ChatIntent {
     }
 }
 
-const DEBUG_KEYWORDS: &[&str] = &[
-    "pourquoi", "échoue", "bug", "erreur", "crash", "plantage", "why", "fail", "broken", "error",
-    "panic", "trace", "fix", "debug",
-];
-
-const EXPLORE_KEYWORDS: &[&str] = &[
-    "comment",
-    "fonctionne",
-    "architecture",
-    "structure",
-    "how does",
-    "explain",
-    "what is",
-    "overview",
-    "comprendre",
-    "understand",
-];
-
-const IMPACT_KEYWORDS: &[&str] = &[
-    "impact",
-    "modifier",
-    "changer",
-    "refactor",
-    "change",
-    "modify",
-    "rename",
-    "move",
-    "delete",
-    "supprim",
-    "déplacer",
-    "review",
-    "audit",
-    "coverage",
-    "quality",
-];
-
-const PLAN_KEYWORDS: &[&str] = &[
-    "planifie",
-    "ajouter",
-    "implémenter",
-    "plan",
-    "implement",
-    "create",
-    "build",
-    "add feature",
-    "nouvelle",
-    "design",
-    "roadmap",
-    "milestone",
-];
-
-/// L'intention d'un texte, par mots-clés. Priorité : Debug > Impact > Plan >
-/// Explore > General (déboguer est urgent).
-pub fn detect_intent(text: &str) -> ChatIntent {
-    let lower = text.to_lowercase();
-    let any = |keywords: &[&str]| keywords.iter().any(|kw| lower.contains(kw));
-    if any(DEBUG_KEYWORDS) {
-        ChatIntent::Debug
-    } else if any(IMPACT_KEYWORDS) {
-        ChatIntent::Impact
-    } else if any(PLAN_KEYWORDS) {
-        ChatIntent::Plan
-    } else if any(EXPLORE_KEYWORDS) {
-        ChatIntent::Explore
-    } else {
-        ChatIntent::General
-    }
-}
-
 /// La classe de travail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,11 +169,16 @@ impl TurnSignature {
 
     /// Un tour de conversation tapé par une personne.
     ///
-    /// L'intention vient du détecteur à mots-clés. La longueur du message
-    /// ajoute au plus deux points de complexité, et le message lui-même au
-    /// besoin de contexte.
+    /// La classe est une métadonnée de compatibilité constante (`General`) : la
+    /// longueur du message ajoute au plus deux points de complexité, et le
+    /// message lui-même au besoin de contexte. Aucune intention n'est déduite du
+    /// texte ici — la structure cognitive vient de `TaskRepr` / `LearnedClass`.
     pub fn from_chat(message: &str, has_images: bool, hints: ContextHints) -> Self {
-        let class = TaskClass::Chat(detect_intent(message));
+        // MÉTADONNÉE DE COMPATIBILITÉ UNIQUEMENT. La classe n'est plus déduite du
+        // texte : aucun lexique n'intervient dans le chemin cognitif. La structure
+        // des connaissances et des apprentissages vient de `TaskRepr` / `LearnedClass`
+        // (cf. `crate::cognition`), pas d'ici.
+        let class = TaskClass::Chat(ChatIntent::General);
         let chars = message.chars().count();
         let length_bonus = (chars / 800).min(2) as u8;
         let message_tokens = chars as u64 / CHARS_PER_TOKEN;
@@ -300,39 +236,50 @@ mod tests {
         TurnSignature::from_chat(message, false, ContextHints::default())
     }
 
-    /// PO `signature.rs::the_class_does_not_depend_on_the_language` et
-    /// `neurons/intent.rs` (`debug_fr_*`, `explore_en_*`, `edge_mixed_debug_wins_over_explore`).
+    /// INVARIANT DE CONCEPTION : aucun lexique ne classe une demande.
+    ///
+    /// Ce test garde la **suppression** : les quatre dictionnaires de mots-clés et
+    /// `detect_intent` ne doivent jamais revenir dans le chemin de décision. Il lit
+    /// la source du module, donc il voit une réintroduction que le typage ne verrait
+    /// pas (un dictionnaire déplacé dans une constante, une regex, une table).
     #[test]
-    fn la_classe_ne_depend_pas_de_la_langue() {
-        for (fr, en, intent) in [
-            (
-                "pourquoi le paiement échoue ?",
-                "why does auth fail?",
-                ChatIntent::Debug,
-            ),
-            (
-                "comment fonctionne le cache ?",
-                "how does the API work?",
-                ChatIntent::Explore,
-            ),
-            (
-                "modifier le schéma",
-                "rename the module",
-                ChatIntent::Impact,
-            ),
-            (
-                "planifie un endpoint",
-                "implement registration",
-                ChatIntent::Plan,
-            ),
-            ("bonjour", "payment service", ChatIntent::General),
-        ] {
-            assert_eq!(chat(fr).class, TaskClass::Chat(intent), "{fr}");
-            assert_eq!(chat(en).class, TaskClass::Chat(intent), "{en}");
+    fn aucun_lexique_dans_le_chemin_cognitif() {
+        // On ne scanne que le code de PRODUCTION : le test lui-même nomme les motifs
+        // interdits, il se trouverait sinon lui-même en faute.
+        let source = include_str!("signature.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("le module de tests suit le code de production");
+        // `to_lowercase` n'est PAS dans la liste : `TaskClass::parse` l'utilise pour
+        // lire une classe énoncée par un appelant — c'est un parseur, explicitement
+        // autorisé. Ce qui est interdit, c'est de *classer* un texte libre.
+        for interdit in ["KEYWORDS", "detect_intent", "lower.contains"] {
+            assert!(
+                !production.contains(interdit),
+                "« {interdit} » est revenu dans signature.rs : un lexique classe à nouveau les demandes, ce que la directive interdit"
+            );
         }
-        // Debug gagne sur Explore.
-        assert_eq!(detect_intent("explain why it fails"), ChatIntent::Debug);
-        assert_eq!(detect_intent(""), ChatIntent::General);
+    }
+
+    /// La classe n'est plus qu'une métadonnée de compatibilité : elle ne dépend
+    /// plus du texte, donc deux textes opposés rendent la même métadonnée.
+    #[test]
+    fn la_classe_est_une_metadonnee_et_ne_lit_pas_le_texte() {
+        for texte in [
+            "pourquoi le paiement échoue ?",
+            "why does auth fail?",
+            "planifie un endpoint",
+            "",
+            "لا يعمل الدفع",
+            "支払いが失敗する理由",
+        ] {
+            assert_eq!(
+                chat(texte).class,
+                TaskClass::Chat(ChatIntent::General),
+                "la métadonnée de compatibilité ne doit pas être déduite du texte ({texte})"
+            );
+        }
     }
 
     /// PO `signature.rs::a_chat_request_is_a_pilot_with_tools_and_reads_images_from_the_caller`.

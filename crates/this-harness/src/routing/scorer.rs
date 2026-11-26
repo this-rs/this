@@ -329,28 +329,39 @@ fn normalise(values: &[Option<f64>]) -> Vec<f64> {
 /// l'ordre ne dépend **jamais** de l'ordre d'entrée.
 pub fn score(
     signature: &TurnSignature,
+    class: &str,
     candidates: &[Candidate],
     arms: &[ArmStats],
     hints: &PriorHints,
     settings: &RoutingSettings,
     seed: u64,
 ) -> Vec<Scored> {
-    score_impl(signature, candidates, arms, hints, settings, Some(seed))
+    score_impl(
+        signature,
+        class,
+        candidates,
+        arms,
+        hints,
+        settings,
+        Some(seed),
+    )
 }
 
 /// Note les bras par leur moyenne postérieure, sans tirage ni exploration.
 pub(crate) fn score_mean(
     signature: &TurnSignature,
+    class: &str,
     candidates: &[Candidate],
     arms: &[ArmStats],
     hints: &PriorHints,
     settings: &RoutingSettings,
 ) -> Vec<Scored> {
-    score_impl(signature, candidates, arms, hints, settings, None)
+    score_impl(signature, class, candidates, arms, hints, settings, None)
 }
 
 fn score_impl(
     signature: &TurnSignature,
+    class: &str,
     candidates: &[Candidate],
     arms: &[ArmStats],
     hints: &PriorHints,
@@ -360,8 +371,10 @@ fn score_impl(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let class = signature.arm_key();
-    let index = arms_of_class(arms, &class);
+    // La classe vient de l'appelant (le routeur, via `DecideRequest::class_key`) :
+    // elle n'est PAS recalculée ici depuis la signature, sinon une classe cognitive
+    // `repr.*` serait écartée au profit de la métadonnée `chat.general`.
+    let index = arms_of_class(arms, class);
     let stored = |facts: &Candidate| {
         index
             .get(&(facts.provider_id.as_str(), facts.model.as_str()))
@@ -400,7 +413,7 @@ fn score_impl(
             // Graine par l'identité du bras, pas par sa position.
             let draw = match seed {
                 Some(seed) => {
-                    let arm_seed = seed ^ stable_hash(&[&class, &facts.provider_id, &facts.model]);
+                    let arm_seed = seed ^ stable_hash(&[class, &facts.provider_id, &facts.model]);
                     beta_draw(alpha, beta, arm_seed)
                 }
                 None => posterior_mean(alpha, beta),
@@ -532,7 +545,14 @@ mod tests {
     fn score_mean_utilise_les_moyennes_sans_tirage_meme_avec_exploration_reglee() {
         let sig = TurnSignature::from_chat("hello", false, ContextHints::default());
         let candidates = vec![facts("a", "m3", None), facts("a", "m2", None)];
-        let scores = score_mean(&sig, &candidates, &[], &PriorHints::new(), &settings(1.0));
+        let scores = score_mean(
+            &sig,
+            &sig.arm_key(),
+            &candidates,
+            &[],
+            &PriorHints::new(),
+            &settings(1.0),
+        );
         assert_eq!(scores.len(), 2);
         assert_eq!(scores[0].candidate.model, "m2");
         for score in scores {
@@ -570,7 +590,15 @@ mod tests {
             arm(&sig, &calm, 500.0, 500.0),
         ];
         let pool = [near.clone(), calm.clone()];
-        let out = score(&sig, &pool, &arms, &PriorHints::new(), &settings(0.0), 7);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &pool,
+            &arms,
+            &PriorHints::new(),
+            &settings(0.0),
+            7,
+        );
         assert_eq!(out.len(), 2, "le compte presque plein reste candidat");
         assert_eq!(out[0].candidate.provider_id, "calm");
         assert!(out[1].quota_norm > 0.8);
@@ -579,7 +607,15 @@ mod tests {
             quota_weight: 0.0,
             ..settings(0.0)
         };
-        let out = score(&sig, &pool, &arms, &PriorHints::new(), &off, 7);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &pool,
+            &arms,
+            &PriorHints::new(),
+            &off,
+            7,
+        );
         assert!(out.iter().all(|x| (x.utility - x.draw).abs() < 1e-12));
     }
 
@@ -589,16 +625,27 @@ mod tests {
         let sig = signature(TaskClass::Simple);
         let pool = vec![facts("a", "m", Some(1.0)), facts("b", "m", Some(1.0))];
         let hints = PriorHints::new();
-        let first = score(&sig, &pool, &[], &hints, &settings(0.1), 42);
-        assert_eq!(first, score(&sig, &pool, &[], &hints, &settings(0.1), 42));
+        let first = score(&sig, &sig.arm_key(), &pool, &[], &hints, &settings(0.1), 42);
+        assert_eq!(
+            first,
+            score(&sig, &sig.arm_key(), &pool, &[], &hints, &settings(0.1), 42)
+        );
         // Le départage est déterministe : l'ordre d'entrée ne compte pas.
         let reversed: Vec<_> = pool.iter().rev().cloned().collect();
         assert_eq!(
             first,
-            score(&sig, &reversed, &[], &hints, &settings(0.1), 42)
+            score(
+                &sig,
+                &sig.arm_key(),
+                &reversed,
+                &[],
+                &hints,
+                &settings(0.1),
+                42
+            )
         );
         let differs = (0..20).any(|s| {
-            score(&sig, &pool, &[], &hints, &settings(0.1), s)[0]
+            score(&sig, &sig.arm_key(), &pool, &[], &hints, &settings(0.1), s)[0]
                 .candidate
                 .provider_id
                 != first[0].candidate.provider_id
@@ -627,6 +674,7 @@ mod tests {
         };
         let out = score(
             &sig,
+            &sig.arm_key(),
             &[dear.clone(), cheap.clone()],
             &[slow_arm, fast_arm],
             &PriorHints::new(),
@@ -655,7 +703,15 @@ mod tests {
             facts("c", "m", Some(9.0)),
             facts("sub", "m", None),
         ];
-        let out = score(&sig, &pool, &[], &PriorHints::new(), &settings(0.0), 1);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &pool,
+            &[],
+            &PriorHints::new(),
+            &settings(0.0),
+            1,
+        );
         let by = |p: &str| out.iter().find(|x| x.candidate.provider_id == p).unwrap();
         assert!(
             (by("sub").cost_norm - by("b").cost_norm).abs() < 1e-9,
@@ -664,12 +720,31 @@ mod tests {
         assert!((by("c").cost_norm - 1.0).abs() < 1e-9);
 
         let free = vec![facts("x", "m", None), facts("y", "m", None)];
-        let out = score(&sig, &free, &[], &PriorHints::new(), &settings(0.0), 1);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &free,
+            &[],
+            &PriorHints::new(),
+            &settings(0.0),
+            1,
+        );
         assert!(
             out.iter()
                 .all(|x| x.cost_norm == 0.0 && x.latency_norm == 0.0)
         );
-        assert!(score(&sig, &[], &[], &PriorHints::new(), &settings(0.0), 1).is_empty());
+        assert!(
+            score(
+                &sig,
+                &sig.arm_key(),
+                &[],
+                &[],
+                &PriorHints::new(),
+                &settings(0.0),
+                1
+            )
+            .is_empty()
+        );
     }
 
     /// PO `scorer.rs::a_stored_arm_cost_wins_over_the_estimate`.
@@ -683,6 +758,7 @@ mod tests {
         measured.cost_n = 2;
         let out = score(
             &sig,
+            &sig.arm_key(),
             &[a, b],
             &[measured],
             &PriorHints::new(),
@@ -716,7 +792,7 @@ mod tests {
             .with("p", "big", "deep")
             .with("p", "small", "fast");
         let pool = [deep.clone(), fast.clone()];
-        let out = score(&sig, &pool, &[], &hints, &settings(0.0), 3);
+        let out = score(&sig, &sig.arm_key(), &pool, &[], &hints, &settings(0.0), 3);
         let big = out.iter().find(|x| x.candidate.model == "big").unwrap();
         assert_eq!((big.alpha, big.beta, big.n), (2.0, 1.0, 0));
 
@@ -724,7 +800,7 @@ mod tests {
         let mean_draw = |model: &str| {
             (0..400)
                 .map(|s| {
-                    score(&sig, &pool, &[], &hints, &settings(0.0), s)
+                    score(&sig, &sig.arm_key(), &pool, &[], &hints, &settings(0.0), s)
                         .into_iter()
                         .find(|x| x.candidate.model == model)
                         .unwrap()
@@ -737,7 +813,15 @@ mod tests {
 
         // ...mais un bras stocké l'ignore.
         let stored = arm(&sig, &deep, 1.0, 9.0);
-        let out = score(&sig, &pool, &[stored], &hints, &settings(0.0), 3);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &pool,
+            &[stored],
+            &hints,
+            &settings(0.0),
+            3,
+        );
         let big = out.iter().find(|x| x.candidate.model == "big").unwrap();
         assert_eq!((big.alpha, big.beta), (1.0, 9.0));
     }
@@ -749,7 +833,15 @@ mod tests {
         let f = facts("a", "m", None);
         let other = signature(TaskClass::Complex);
         let wrong = arm(&other, &f, 50.0, 1.0);
-        let out = score(&sig, &[f], &[wrong], &PriorHints::new(), &settings(0.0), 1);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &[f],
+            &[wrong],
+            &PriorHints::new(),
+            &settings(0.0),
+            1,
+        );
         assert_eq!((out[0].alpha, out[0].beta, out[0].n), (1.0, 1.0, 0));
     }
 
@@ -765,9 +857,17 @@ mod tests {
         let rate = |epsilon: f64| {
             let fired = (0..3_000u64)
                 .filter(|s| {
-                    score(&sig, &pool, &[], &PriorHints::new(), &settings(epsilon), *s)
-                        .iter()
-                        .any(|x| x.explored)
+                    score(
+                        &sig,
+                        &sig.arm_key(),
+                        &pool,
+                        &[],
+                        &PriorHints::new(),
+                        &settings(epsilon),
+                        *s,
+                    )
+                    .iter()
+                    .any(|x| x.explored)
                 })
                 .count();
             fired as f64 / 3_000.0
@@ -780,6 +880,7 @@ mod tests {
         // Un candidat seul n'a rien à explorer.
         let one = score(
             &sig,
+            &sig.arm_key(),
             &pool[..1],
             &[],
             &PriorHints::new(),
@@ -789,9 +890,28 @@ mod tests {
         assert!(!one[0].explored);
         // La paire explorée passe en tête.
         let seed = (0..3_000u64)
-            .find(|s| score(&sig, &pool, &[], &PriorHints::new(), &settings(0.25), *s)[0].explored)
+            .find(|s| {
+                score(
+                    &sig,
+                    &sig.arm_key(),
+                    &pool,
+                    &[],
+                    &PriorHints::new(),
+                    &settings(0.25),
+                    *s,
+                )[0]
+                .explored
+            })
             .unwrap();
-        let out = score(&sig, &pool, &[], &PriorHints::new(), &settings(0.25), seed);
+        let out = score(
+            &sig,
+            &sig.arm_key(),
+            &pool,
+            &[],
+            &PriorHints::new(),
+            &settings(0.25),
+            seed,
+        );
         assert_eq!(out.iter().filter(|x| x.explored).count(), 1);
     }
 

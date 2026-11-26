@@ -97,9 +97,27 @@ pub trait PoolSource {
 /// reçoit chaque décision et chaque fin de tour pour les nourrir.
 #[async_trait(?Send)]
 pub trait Learning {
-    /// Les bras stockés de la classe `class` (clé de [`TurnSignature::arm_key`]).
+    /// Les bras stockés pour la classe `class`. Cette clé est l'identité cognitive
+    /// issue de [`Learning::classify`] (ou la clé neutre d'incertitude) — **pas**
+    /// [`TurnSignature::arm_key`], qui n'est qu'une métadonnée de compatibilité.
     async fn arms(&self, _class: &str) -> Vec<ArmStats> {
         Vec::new()
+    }
+
+    /// La classe **cognitive** d'une représentation.
+    ///
+    /// C'est ici que la mémoire décide de la structure : un apprenant qui tient des
+    /// prototypes dans Obrain les compare à `repr.embedding` et rend une classe
+    /// apprise. Sans mémoire, ou sans représentation, la réponse est explicitement
+    /// [`Classification::inconnue`] — et le routeur suit sa politique neutre.
+    ///
+    /// Aucun lexique n'intervient : la méthode ne reçoit que des vecteurs, des
+    /// modalités et des contraintes.
+    async fn classify(
+        &self,
+        _repr: &crate::cognition::TaskRepr,
+    ) -> crate::cognition::Classification {
+        crate::cognition::Classification::inconnue()
     }
 
     /// Les alias déclarés, lus comme un a priori.
@@ -335,6 +353,9 @@ pub struct RouterSpec {
     pub needs_tools: bool,
     /// Qui parle.
     pub role: Role,
+    /// La couche perception : encodeur sémantique, s'il y en a un de configuré.
+    /// `None` : aucune représentation vectorielle n'est disponible pour ce routeur.
+    pub encoder: Option<Rc<dyn crate::cognition::SemanticEncoder>>,
     /// La mémoire des modèles que le moteur a refusés. `None` : le routeur en tient une à lui
     /// (propre à cette conversation) ; une mémoire PARTAGÉE entre les routeurs de l'hôte fait
     /// qu'un modèle refusé dans une conversation l'est pour toutes.
@@ -363,6 +384,7 @@ impl RouterSpec {
             provider_imposed: false,
             needs_tools: true,
             role: Role::Pilot,
+            encoder: None,
             availability: None,
         }
     }
@@ -406,6 +428,12 @@ impl RouterSpec {
         self
     }
 
+    /// Configure la couche perception : un encodeur sémantique.
+    pub fn encoder(mut self, encoder: Rc<dyn crate::cognition::SemanticEncoder>) -> Self {
+        self.encoder = Some(encoder);
+        self
+    }
+
     pub fn learning(mut self, learning: Rc<dyn Learning>) -> Self {
         self.learning = learning;
         self
@@ -441,6 +469,10 @@ struct Choice {
 struct Open {
     id: u128,
     pick: Pick,
+    /// La classe cognitive qui a porté la décision initiale. Le repli après quota
+    /// la REUTILISE telle quelle : la mémoire (prototypes) peut évoluer entre
+    /// `route` et le repli, une réévaluation ne rendrait pas la même classe.
+    class: String,
     /// Ce que le tour a quitté, quand il a changé de paire : si le moteur n'est
     /// jamais joint, on y revient ([`TurnRouter::settle`]).
     before: Option<Before>,
@@ -500,6 +532,8 @@ struct State {
 /// Le routeur d'UNE conversation.
 pub struct TurnRouter {
     pool: Rc<dyn PoolSource>,
+    /// La couche perception (aucune par défaut : pas de dépendance à un fournisseur).
+    encoder: Option<Rc<dyn crate::cognition::SemanticEncoder>>,
     learning: Rc<dyn Learning>,
     seeds: Rc<dyn Seeds>,
     needs_tools: bool,
@@ -578,6 +612,7 @@ pub fn restrict_to_person_list(
 
 impl TurnRouter {
     pub fn new(spec: RouterSpec) -> Self {
+        let encoder = spec.encoder.clone();
         let pool = (spec.routing_pool.len() > 1).then_some(spec.routing_pool);
         let routes = spec.mode == Some(ConversationRoutingMode::Full) || pool.is_some();
         let mut routing = spec.settings.clone();
@@ -587,6 +622,7 @@ impl TurnRouter {
         routing.stage = conversation_stage(spec.settings.stage, routes);
         Self {
             pool: spec.pool,
+            encoder,
             learning: spec.learning,
             seeds: spec.seeds,
             needs_tools: spec.needs_tools,
@@ -753,6 +789,33 @@ impl TurnRouter {
     /// Cette future peut être lâchée à tout moment (le harnais la borne dans le
     /// temps et la coupe sur annulation, voir [`TurnRouter::fallback`]) : l'état
     /// n'est réécrit qu'en un seul bloc, sans attente au milieu.
+    /// Construit la représentation d'un tour : modalités, contraintes objectives,
+    /// et le vecteur de l'encodeur s'il y en a un. Aucune lecture lexicale.
+    fn representation(
+        &self,
+        text: &str,
+        has_images: bool,
+        signature: &TurnSignature,
+    ) -> crate::cognition::TaskRepr {
+        let embedding = self
+            .encoder
+            .as_ref()
+            .and_then(|e| e.encode(text))
+            .filter(|v| !v.is_empty());
+        crate::cognition::TaskRepr {
+            embedding,
+            modalities: crate::cognition::Modalities::of_turn(!text.is_empty(), has_images),
+            constraints: crate::cognition::Constraints {
+                context_need_tokens: signature.context_need_tokens,
+                budget_remaining_usd: signature.budget_remaining_usd,
+                needs_tools: signature.needs_tools,
+                needs_images: signature.needs_images,
+                attempt: signature.attempt,
+            },
+            goals: Vec::new(),
+        }
+    }
+
     pub async fn route(&self, turn: TurnInput<'_>) -> Routed {
         // Un tour appliqué dont la fin n'est jamais venue (future lâchée, page
         // suspendue, `settle` coupé) est abandonné : rangé pour être dit à
@@ -798,7 +861,16 @@ impl TurnRouter {
         let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
         signature.needs_tools = self.needs_tools;
         signature.role = self.role;
-        let class = signature.arm_key();
+        // La classe vient de la REPRÉSENTATION (vecteur + prototypes appris), jamais
+        // du texte : aucun lexique n'est consulté ici.
+        let repr = self.representation(turn.text, turn.has_images, &signature);
+        // `class` est l'identité cognitive constituée, ou `None` (inconnue /
+        // proposition non enregistrée). `arms_key` est la clé NEUTRE pour la
+        // lecture des bras — elle ne sert jamais à attribuer une observation.
+        let class = self.learning.classify(&repr).await.class_key();
+        let arms_key = class
+            .clone()
+            .unwrap_or_else(|| crate::cognition::CLASSE_INCONNUE.to_string());
 
         let mut pool = self.current_pool().await;
         if let Some(entries) = &choice.pool {
@@ -845,7 +917,7 @@ impl TurnRouter {
         let may_move = rights.provider && (blind || !just_moved);
         // Juste après un changement, un tour de la même classe est stable.
         let held = held_turn.is_some_and(|t| t.checked_add(1) == Some(index))
-            && held_class.as_deref() == Some(class.as_str());
+            && held_class.as_deref() == class.as_deref();
 
         let mut settings = settings_for(&choice.routing, rights.auto);
         // Un pool est routé comme `full` à l'intérieur, quel que soit le mode des réglages.
@@ -853,6 +925,10 @@ impl TurnRouter {
             settings.mode = ProviderRoutingMode::Full;
         }
         let mut request = DecideRequest::new(signature, settings, pool);
+        // Le scoreur lit les bras par la clé NEUTRE (l'identité, sinon
+        // `repr.unknown`). L'identité cognitive, elle, est portée par la décision
+        // APRÈS coup (voir plus bas) : `None` = pas d'attribution.
+        request.class = Some(arms_key.clone());
         request.current = has_pair.then(|| current.clone());
         request.turn_index = Some(index);
         request.narrowed.extend(person);
@@ -870,7 +946,7 @@ impl TurnRouter {
             });
         }
 
-        let arms = self.learning.arms(&class).await;
+        let arms = self.learning.arms(&arms_key).await;
         let hints = self.learning.hints();
         let id = self.seeds.next_id();
         let mut decision = decide(id, &request, &arms, &hints);
@@ -960,7 +1036,7 @@ impl TurnRouter {
                         state.provider = pick.provider_id.clone();
                         state.model = pick.model.clone();
                         state.last_change_turn = Some(index);
-                        state.last_change_class = Some(class);
+                        state.last_change_class = class.clone();
                         if moves {
                             state.last_move_turn = Some(index);
                         }
@@ -969,6 +1045,7 @@ impl TurnRouter {
                     state.open = Some(Open {
                         id: decision.id,
                         pick,
+                        class: arms_key.clone(),
                         before,
                         generation: state.generation,
                     });
@@ -981,6 +1058,10 @@ impl TurnRouter {
                 decision.applied = apply
                     && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
                 decision.used = used;
+                // L'identité cognitive de l'attribution : `None` quand aucune
+                // connaissance n'est constituée (routage neutre, aucune observation
+                // n'est attribuée à une classe commune).
+                decision.cognitive_class = class.clone();
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed,
@@ -1143,9 +1224,14 @@ impl TurnRouter {
         if !turn.honored {
             return None;
         }
-        let (choice, manual, generation) = {
+        let (choice, manual, generation, open_class) = {
             let state = self.state.borrow();
-            (state.choice.clone(), state.manual, state.generation)
+            (
+                state.choice.clone(),
+                state.manual,
+                state.generation,
+                state.open.as_ref().map(|o| o.class.clone()),
+            )
         };
         let rights = rights_of(&choice, manual);
         if !rights.routes || !rights.auto {
@@ -1154,7 +1240,21 @@ impl TurnRouter {
         let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
         signature.needs_tools = self.needs_tools;
         signature.role = self.role;
-        let class = signature.arm_key();
+        // Le repli réutilise la classe de la décision initiale (ouverte) : la mémoire
+        // peut évoluer entre `route` et ce repli, une réévaluation ne rendrait pas la
+        // même classe. On ne recalcule que s'il n'y a PAS d'état ouvert (repli sans
+        // décision préalable — cas qui n'existe pas dans le cycle normal).
+        let class = match open_class {
+            Some(class) => class,
+            None => {
+                let repr = self.representation(turn.text, turn.has_images, &signature);
+                self.learning
+                    .classify(&repr)
+                    .await
+                    .class_key()
+                    .unwrap_or_else(|| crate::cognition::CLASSE_INCONNUE.to_string())
+            }
+        };
 
         let mut pool = self.current_pool().await;
         // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais
@@ -1200,6 +1300,7 @@ impl TurnRouter {
         // Déterministe : pas de tirage, pas d'hystérésis (la paire en vigueur vient de refuser).
         settings.exploration_epsilon = 0.0;
         let mut request = DecideRequest::new(signature, settings, pool);
+        request.class = Some(class.clone());
         request.restrict_provider = Some(last.provider_id.clone());
         request.steady = true;
         request.narrowed.push(narrowed);

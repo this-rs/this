@@ -1,0 +1,140 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-adaptatif)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.98s
+     Running tests/l6_confiance_temporelle.rs (target/debug/deps/l6_confiance_temporelle-7507d2eac50a1b20)
+
+running 2 tests
+test l6_corpus_est_bien_forme ... ok
+test l6_confiance_temporelle has been running for over 60 seconds
+===== L6 · S1 relation utile =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  D relat.cumulé      0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  E relat.λ           0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  F relat.temporel    0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  G relat.λ·t         0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  H relat.horizons    0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+===== L6 · S2 trompeuse unique =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+  D relat.cumulé      0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+  E relat.λ           0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+  F relat.temporel    0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+  G relat.λ·t         0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+  H relat.horizons    0.10   0.40   0.40   0.604     5.44      +0.726           —             —
+===== L6 · S3 pertinence changeante =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.475     7.45          +0        6.80    50% @ t=19
+  B global            0.30   0.50   0.60   0.450     7.71 +0.25200000000000156        7.10    50% @ t=19
+  C relat.fixe        0.30   0.50   0.60   0.475     7.38 -0.03399999999999892        6.90    50% @ t=20
+  D relat.cumulé      0.30   0.50   0.60   0.475     7.38 -0.03399999999999892        6.90    50% @ t=20
+  E relat.λ           0.30   0.50   0.60   0.483     7.25 -0.2049999999999983        6.90    50% @ t=20
+  F relat.temporel    0.30   0.50   0.60   0.479     7.25 -0.036999999999999034        6.80    50% @ t=20
+  G relat.λ·t         0.30   0.50   0.60   0.483     7.25 -0.2049999999999983        6.90    50% @ t=20
+  H relat.horizons    0.30   0.50   0.60   0.479     7.25 -0.036999999999999034        6.80    50% @ t=20
+===== L6 · S4 concurrentes =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.30   0.50   0.60   0.662     4.65 +0.031000000000000583           —             —
+  D relat.cumulé      0.30   0.60   0.70   0.675     4.48 -0.2560000000000002           —             —
+  E relat.λ           0.30   0.60   0.70   0.675     4.48 -0.17800000000000082           —             —
+  F relat.temporel    0.30   0.60   0.70   0.671     4.53 -0.19899999999999984           —             —
+  G relat.λ·t         0.30   0.60   0.70   0.667     4.60 -0.1459999999999999           —             —
+  H relat.horizons    0.30   0.60   0.70   0.671     4.53 -0.1459999999999999           —             —
+===== L6 · S5 plusieurs trompeuses =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.20   0.30   0.50   0.596     5.57 +0.7910000000000004           —             —
+  D relat.cumulé      0.20   0.40   0.50   0.608     5.39 +0.7370000000000001           —             —
+  E relat.λ           0.20   0.30   0.50   0.596     5.57 +0.7910000000000004           —             —
+  F relat.temporel    0.20   0.40   0.50   0.613     5.33 +0.7340000000000009           —             —
+  G relat.λ·t         0.20   0.30   0.50   0.596     5.57 +0.7910000000000004           —             —
+  H relat.horizons    0.20   0.40   0.50   0.608     5.39 +0.7340000000000009           —             —
+===== L6 · S6 redondantes =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  D relat.cumulé      0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  E relat.λ           0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  F relat.temporel    0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  G relat.λ·t         0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+  H relat.horizons    0.30   0.60   0.80   0.708     4.02 -0.8649999999999993           —             —
+===== L6 · S7 capacités inédites =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.454     7.78          +0        6.60    50% @ t=22
+  B global            0.30   0.50   0.70   0.487     7.20 -0.5839999999999979        6.40    60% @ t=22
+  C relat.fixe        0.30   0.60   0.70   0.475     7.41 -0.41999999999999904        6.40    70% @ t=22
+  D relat.cumulé      0.30   0.60   0.70   0.467     7.52 -0.4769999999999994        6.40    60% @ t=22
+  E relat.λ           0.30   0.60   0.70   0.475     7.41 -0.41999999999999904        6.40    70% @ t=22
+  F relat.temporel    0.30   0.60   0.70   0.463     7.59 -0.4769999999999994        7.00    60% @ t=22
+  G relat.λ·t         0.30   0.60   0.70   0.475     7.41 -0.41999999999999904        6.40    70% @ t=22
+  H relat.horizons    0.30   0.60   0.70   0.463     7.59 -0.5339999999999989        7.00    60% @ t=22
+===== L6 · S8 absence de relation =====
+  politique             t0    k=4    k=8  succès   regret Δregret / A sous-opt. t>        récup.
+  A local             0.10   0.40   0.60   0.646     4.88          +0           —             —
+  B global            0.30   0.50   0.50   0.633     5.04 +0.12600000000000122           —             —
+  C relat.fixe        0.10   0.40   0.60   0.646     4.88          +0           —             —
+  D relat.cumulé      0.10   0.40   0.60   0.646     4.88          +0           —             —
+  E relat.λ           0.10   0.40   0.60   0.646     4.88          +0           —             —
+  F relat.temporel    0.10   0.40   0.60   0.646     4.88          +0           —             —
+  G relat.λ·t         0.10   0.40   0.60   0.646     4.88          +0           —             —
+  H relat.horizons    0.10   0.40   0.60   0.646     4.88          +0           —             —
+  (t0 / k=4 / k=8 : choix optimal après exactement 0, 4 et 8 observations ;
+   succès : sur tous les tours ; Δregret/A : médiane par graine, > 0 = transfert NÉGATIF)
+===== L6 · coût (temps écoulé, 3 graines) =====
+  A local           total  48.2s   (~6027 ms/scénario)
+  B global          total  64.3s   (~8043 ms/scénario)
+  C relat.fixe      total  62.0s   (~7754 ms/scénario)
+  D relat.cumulé    total  68.2s   (~8523 ms/scénario)
+  E relat.λ         total  70.6s   (~8821 ms/scénario)
+  F relat.temporel  total  63.8s   (~7972 ms/scénario)
+  G relat.λ·t       total  72.6s   (~9074 ms/scénario)
+  H relat.horizons  total  61.3s   (~7658 ms/scénario)
+  (toutes les politiques relationnelles font le même nombre de lectures GQL par tour :
+   la différence de coût est du calcul en mémoire, pas des lectures)
+===== L6 · confiance apprise (graine 0) =====
+  · S4 concurrentes ·
+    D relat.cumulé    c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.04 w=0.94  deux: c=+0.00 w=1.06]  c2 [un: c=+0.01 w=1.02  deux: c=+0.00 w=0.98]  c3 [un: c=+0.04 w=1.07  deux: c=+0.00 w=0.93]  c4 [un: c=+0.00 w=1.22  deux: c=-0.15 w=0.78]  c5 [un: c=+0.30 w=1.94  deux: c=-0.85 w=0.06]  c6 [un: c=+0.00 w=1.50  deux: c=-0.36 w=0.50]  c7 [un: c=+0.18 w=1.69  deux: c=-0.39 w=0.31]  c8 [un: c=+0.00 w=1.43  deux: c=-0.31 w=0.57]  c9 [un: c=+0.00 w=1.06  deux: c=-0.04 w=0.94]
+    E relat.λ         c0 [un: c=+1.00 w=1.00  deux: c=+1.00 w=1.00]  c1 [un: c=+0.11 w=0.20  deux: c=+1.00 w=1.80]  c2 [un: c=+0.14 w=0.25  deux: c=+1.00 w=1.75]  c3 [un: c=+0.11 w=0.20  deux: c=+1.00 w=1.80]  c4 [un: c=+1.00 w=1.90  deux: c=+0.05 w=0.10]  c5 [un: c=+0.50 w=1.83  deux: c=+0.05 w=0.17]  c6 [un: c=+1.00 w=1.88  deux: c=+0.06 w=0.12]  c7 [un: c=+0.25 w=1.67  deux: c=+0.05 w=0.33]  c8 [un: c=+1.00 w=1.88  deux: c=+0.07 w=0.12]  c9 [un: c=+1.00 w=1.88  deux: c=+0.07 w=0.12]
+    F relat.temporel  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=+0.23 w=1.34  deux: c=+0.00 w=0.66]  c2 [un: c=-0.09 w=0.87  deux: c=+0.00 w=1.13]  c3 [un: c=-0.07 w=0.89  deux: c=+0.00 w=1.11]  c4 [un: c=+0.00 w=1.35  deux: c=-0.24 w=0.65]  c5 [un: c=+0.34 w=1.97  deux: c=-1.11 w=0.03]  c6 [un: c=+0.00 w=1.57  deux: c=-0.43 w=0.43]  c7 [un: c=+0.20 w=1.74  deux: c=-0.43 w=0.26]  c8 [un: c=+0.00 w=1.58  deux: c=-0.44 w=0.42]  c9 [un: c=+0.00 w=0.94  deux: c=+0.04 w=1.06]
+    H relat.horizons  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=+0.03 w=1.04  deux: c=+0.00 w=0.96]  c2 [un: c=-0.02 w=0.97  deux: c=+0.00 w=1.03]  c3 [un: c=-0.02 w=0.96  deux: c=+0.00 w=1.04]  c4 [un: c=+0.00 w=1.33  deux: c=-0.23 w=0.67]  c5 [un: c=+0.36 w=1.99  deux: c=-1.39 w=0.01]  c6 [un: c=+0.00 w=1.47  deux: c=-0.34 w=0.53]  c7 [un: c=+0.03 w=1.29  deux: c=-0.16 w=0.71]  c8 [un: c=+0.00 w=1.40  deux: c=-0.28 w=0.60]  c9 [un: c=+0.00 w=0.95  deux: c=+0.03 w=1.05]
+  · S3 pertinence changeante ·
+    D relat.cumulé    c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.26 w=0.62  deux: c=+0.00 w=1.38]  c2 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c3 [un: c=+0.00 w=1.01  deux: c=+0.00 w=0.99]  c4 [un: c=+0.00 w=0.90  deux: c=+0.07 w=1.10]  c5 [un: c=-0.06 w=0.53  deux: c=+0.27 w=1.47]  c6 [un: c=+0.00 w=1.16  deux: c=-0.10 w=0.84]  c7 [un: c=-0.02 w=1.44  deux: c=-0.33 w=0.56]  c8 [un: c=+0.00 w=1.07  deux: c=-0.05 w=0.93]  c9 [un: c=+0.00 w=1.06  deux: c=-0.04 w=0.94]
+    E relat.λ         c0 [un: c=+1.00 w=1.00  deux: c=+1.00 w=1.00]  c1 [un: c=+0.07 w=0.13  deux: c=+1.00 w=1.87]  c2 [un: c=+0.07 w=0.13  deux: c=+1.00 w=1.87]  c3 [un: c=+0.08 w=0.15  deux: c=+1.00 w=1.85]  c4 [un: c=+1.00 w=1.75  deux: c=+0.14 w=0.25]  c5 [un: c=+0.05 w=0.17  deux: c=+0.50 w=1.83]  c6 [un: c=+1.00 w=1.88  deux: c=+0.07 w=0.12]  c7 [un: c=+0.11 w=1.28  deux: c=+0.06 w=0.72]  c8 [un: c=+1.00 w=1.78  deux: c=+0.12 w=0.22]  c9 [un: c=+1.00 w=1.80  deux: c=+0.11 w=0.20]
+    F relat.temporel  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.15 w=0.77  deux: c=+0.00 w=1.23]  c2 [un: c=-0.05 w=0.93  deux: c=+0.00 w=1.07]  c3 [un: c=+0.07 w=1.10  deux: c=+0.00 w=0.90]  c4 [un: c=+0.00 w=0.71  deux: c=+0.20 w=1.29]  c5 [un: c=-0.08 w=0.41  deux: c=+0.37 w=1.59]  c6 [un: c=+0.00 w=1.26  deux: c=-0.18 w=0.74]  c7 [un: c=-0.17 w=0.93  deux: c=-0.12 w=1.07]  c8 [un: c=+0.00 w=0.61  deux: c=+0.28 w=1.39]  c9 [un: c=+0.00 w=0.84  deux: c=+0.11 w=1.16]
+    H relat.horizons  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.22 w=0.68  deux: c=+0.00 w=1.32]  c2 [un: c=-0.04 w=0.93  deux: c=+0.00 w=1.07]  c3 [un: c=+0.06 w=1.09  deux: c=+0.00 w=0.91]  c4 [un: c=+0.00 w=0.76  deux: c=+0.17 w=1.24]  c5 [un: c=-0.07 w=0.40  deux: c=+0.39 w=1.60]  c6 [un: c=+0.00 w=1.26  deux: c=-0.18 w=0.74]  c7 [un: c=-0.15 w=0.95  deux: c=-0.11 w=1.05]  c8 [un: c=+0.00 w=0.93  deux: c=+0.05 w=1.07]  c9 [un: c=+0.00 w=0.87  deux: c=+0.09 w=1.13]
+  · S5 plusieurs trompeuses ·
+    D relat.cumulé    c0 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c1 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c2 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c3 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c4 [deux: c=-0.07 w=1.62  trois: c=-0.55 w=0.38]  c5 [deux: c=-0.69 w=0.21  trois: c=+0.02 w=1.79]  c6 [deux: c=-0.45 w=0.60  trois: c=-0.17 w=1.40]  c7 [deux: c=-0.15 w=1.45  trois: c=-0.48 w=0.55]  c8 [deux: c=-0.32 w=1.13  trois: c=-0.41 w=0.87]  c9 [deux: c=-0.05 w=0.91  trois: c=+0.01 w=1.09]
+    E relat.λ         c0 [deux: c=+1.00 w=1.00  trois: c=+1.00 w=1.00]  c1 [deux: c=+1.00 w=1.00  trois: c=+1.00 w=1.00]  c2 [deux: c=+1.00 w=1.00  trois: c=+1.00 w=1.00]  c3 [deux: c=+1.00 w=1.00  trois: c=+1.00 w=1.00]  c4 [deux: c=+0.06 w=1.00  trois: c=+0.06 w=1.00]  c5 [deux: c=+0.05 w=0.10  trois: c=+1.00 w=1.90]  c6 [deux: c=+0.09 w=1.12  trois: c=+0.07 w=0.88]  c7 [deux: c=+0.06 w=1.00  trois: c=+0.06 w=1.00]  c8 [deux: c=+0.06 w=0.97  trois: c=+0.07 w=1.03]  c9 [deux: c=+0.08 w=0.86  trois: c=+0.11 w=1.14]
+    F relat.temporel  c0 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c1 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c2 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c3 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c4 [deux: c=-0.14 w=1.85  trois: c=-0.97 w=0.15]  c5 [deux: c=-1.05 w=0.08  trois: c=+0.01 w=1.92]  c6 [deux: c=-0.64 w=0.43  trois: c=-0.21 w=1.57]  c7 [deux: c=-0.05 w=1.48  trois: c=-0.39 w=0.52]  c8 [deux: c=-0.50 w=0.88  trois: c=-0.42 w=1.12]  c9 [deux: c=-0.03 w=1.00  trois: c=-0.03 w=1.00]
+    H relat.horizons  c0 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c1 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c2 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c3 [deux: c=+0.00 w=1.00  trois: c=+0.00 w=1.00]  c4 [deux: c=-0.12 w=1.94  trois: c=-1.25 w=0.06]  c5 [deux: c=-1.38 w=0.03  trois: c=+0.01 w=1.97]  c6 [deux: c=-0.43 w=0.63  trois: c=-0.17 w=1.37]  c7 [deux: c=-0.06 w=1.45  trois: c=-0.39 w=0.55]  c8 [deux: c=-0.42 w=0.94  trois: c=-0.38 w=1.06]  c9 [deux: c=-0.03 w=0.98  trois: c=-0.02 w=1.02]
+  · S7 capacités inédites ·
+    D relat.cumulé    c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.21 w=0.70  deux: c=+0.00 w=1.30]  c2 [un: c=-0.14 w=0.80  deux: c=+0.00 w=1.20]  c3 [un: c=-0.06 w=0.91  deux: c=+0.00 w=1.09]  c4 [un: c=+0.00 w=1.17  deux: c=-0.11 w=0.83]  c5 [un: c=-0.10 w=1.79  deux: c=-0.81 w=0.21]  c6 [un: c=+0.00 w=1.20  deux: c=-0.14 w=0.80]  c7 [un: c=+0.01 w=1.11  deux: c=-0.06 w=0.89]  c8 [un: c=+0.00 w=1.48  deux: c=-0.35 w=0.52]  c9 [un: c=+0.00 w=1.03  deux: c=-0.02 w=0.97]
+    E relat.λ         c0 [un: c=+1.00 w=1.00  deux: c=+1.00 w=1.00]  c1 [un: c=+0.08 w=0.15  deux: c=+1.00 w=1.85]  c2 [un: c=+0.09 w=0.17  deux: c=+1.00 w=1.83]  c3 [un: c=+0.06 w=0.12  deux: c=+1.00 w=1.88]  c4 [un: c=+1.00 w=1.80  deux: c=+0.11 w=0.20]  c5 [un: c=+0.20 w=1.62  deux: c=+0.05 w=0.38]  c6 [un: c=+1.00 w=1.83  deux: c=+0.09 w=0.17]  c7 [un: c=+0.33 w=1.62  deux: c=+0.08 w=0.38]  c8 [un: c=+1.00 w=1.89  deux: c=+0.06 w=0.11]  c9 [un: c=+1.00 w=1.88  deux: c=+0.07 w=0.12]
+    F relat.temporel  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.51 w=0.35  deux: c=+0.00 w=1.65]  c2 [un: c=-0.26 w=0.63  deux: c=+0.00 w=1.37]  c3 [un: c=-0.16 w=0.76  deux: c=+0.00 w=1.24]  c4 [un: c=+0.00 w=0.99  deux: c=+0.00 w=1.01]  c5 [un: c=-0.01 w=1.92  deux: c=-1.09 w=0.08]  c6 [un: c=+0.00 w=0.87  deux: c=+0.09 w=1.13]  c7 [un: c=+0.01 w=1.08  deux: c=-0.04 w=0.92]  c8 [un: c=+0.00 w=1.70  deux: c=-0.58 w=0.30]  c9 [un: c=+0.00 w=1.03  deux: c=-0.02 w=0.97]
+    H relat.horizons  c0 [un: c=+0.00 w=1.00  deux: c=+0.00 w=1.00]  c1 [un: c=-0.21 w=0.69  deux: c=+0.00 w=1.31]  c2 [un: c=-0.19 w=0.72  deux: c=+0.00 w=1.28]  c3 [un: c=-0.16 w=0.76  deux: c=+0.00 w=1.24]  c4 [un: c=+0.00 w=0.98  deux: c=+0.02 w=1.02]  c5 [un: c=-0.02 w=1.97  deux: c=-1.39 w=0.03]  c6 [un: c=+0.00 w=1.04  deux: c=-0.02 w=0.96]  c7 [un: c=+0.01 w=1.07  deux: c=-0.04 w=0.93]  c8 [un: c=+0.00 w=1.49  deux: c=-0.36 w=0.51]  c9 [un: c=+0.00 w=1.03  deux: c=-0.02 w=0.97]
+==================================================================
+===== L6 · hypothèses (verdicts, aucune assertion) =====
+  [CONFIRMÉE] H1 une relation utile transfère positivement — S1 regret C 4.02 vs A 4.88 → -0.86
+  [CONFIRMÉE] H2 une relation trompeuse produit un transfert NÉGATIF — S2 regret C 5.44 vs A 4.88 → +0.55
+  [CONFIRMÉE] H3 l'attribution par relation réduit le coût de la relation trompeuse — S4 regret D 4.48 vs C 4.65 → -0.17
+  [RÉFUTÉE  ] H4 (plusieurs trompeuses) la confiance λ atténue le double transfert négatif — S5 regret E 5.57 vs C 5.57 → +0.00
+  [CONFIRMÉE] H5 (plusieurs trompeuses) le crédit cumulé atténue aussi — S5 regret D 5.39 vs C 5.57 → -0.18
+  [CONFIRMÉE] H6 la redondance utile reste un transfert positif — S6 regret C 4.02 vs A 4.88 → -0.86
+  [CONFIRMÉE] H7 le crédit temporel récupère plus vite que le crédit cumulé — S3 choix sous-optimaux après bascule : F 6.80 vs D 6.90
+  [CONFIRMÉE] H8 le crédit temporel récupère, la confiance absolue non — S3 choix sous-optimaux après bascule : F 6.80 vs E 6.90
+  [CONFIRMÉE] H9 la combinaison adaptative des horizons ne dégrade pas la récupération — S3 choix sous-optimaux après bascule : H 6.80 vs F 6.80
+  [RÉFUTÉE  ] H10 (capacités inédites) la confiance λ coupe le transfert périmé — S7 regret après bascule E 3.82 vs C 3.82
+  [RÉFUTÉE  ] H11 (capacités inédites) le crédit temporel coupe aussi le transfert périmé — S7 regret après bascule F 4.19 vs C 3.82
+  → 3 hypothèse(s) réfutée(s) sur 11 (aucune n'invalide le test : un résultat négatif est un résultat)
+test l6_confiance_temporelle ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 510.98s
+
+EXIT=0
