@@ -30,7 +30,6 @@
 //! champ propre (pas seulement fondu dans une clé composite) : c'est lui que les
 //! contre-épreuves relisent champ par champ.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,6 +38,9 @@ use async_trait::async_trait;
 use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
+use this_harness::attribution::{
+    Attribution, Definition, Observation, Reception, Record, Resultat,
+};
 use this_harness::cognition::{LearnedClass, Prototype, SemanticEncoder, TaskRepr, classer};
 use this_harness::routing::{
     ArmKey, ArmStats, Candidate, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick,
@@ -120,9 +122,9 @@ struct Compteurs {
     consultatives: u64,
     /// Observation effectivement écrite (commit rendu).
     creees: u64,
-    /// Déduplication : même identité, même contenu.
+    /// Même définition re-`record`ée, ou même contenu réécrit : idempotent.
     rejeux: u64,
-    /// Déduplication : même identité, contenu divergent.
+    /// Définition ou contenu divergent, refusé sans écrasement.
     conflits: u64,
     /// Lecture de déduplication en échec : issue indéterminée.
     indetermines: u64,
@@ -161,8 +163,10 @@ struct Apprenant {
     prototypes: Vec<Prototype>,
     seuil: f32,
     quantification: u32,
-    /// decision_id → identité constituée (classe).
-    en_cours: Mutex<HashMap<u128, String>>,
+    /// Le cycle logique d'attribution (RAM) : `record` / `recevoir` / `reserver`
+    /// / `confirmer` / `echec_recuperable`. La durabilité est la responsabilité
+    /// d'Obrain, pas de cette primitive.
+    attribution: Mutex<Attribution>,
     compteurs: Mutex<Compteurs>,
     /// Seam de test, explicitement nommé : simule une panne de lecture de la
     /// déduplication (I/O, verrou empoisonné). Rend `Ecriture::Indetermine` au
@@ -178,7 +182,7 @@ impl Apprenant {
             prototypes,
             seuil: 0.9,
             quantification: 1000,
-            en_cours: Mutex::new(HashMap::new()),
+            attribution: Mutex::new(Attribution::new()),
             compteurs: Mutex::new(Compteurs::default()),
             lecture_en_echec: AtomicBool::new(false),
         }
@@ -353,10 +357,12 @@ impl Apprenant {
         s.commit().map_err(|e| format!("commit : {e:?}"))
     }
 
-    /// Écrit UNE observation, avec déduplication par identité stable
-    /// (`evenement = scope/decision_id`). Le contrôle d'entrée d'écriture
+    /// Publie l'observation courante dans Obrain, avec déduplication par identité
+    /// stable (`evenement = scope/decision_id`). Le contrôle d'entrée d'écriture
     /// (`check_write`) est passé AVANT d'écrire : un écrivain périmé est refusé.
-    fn ecrire_observation(
+    /// C'est l'effet durable du cycle logique, jamais appelé directement par les
+    /// contre-épreuves — toujours depuis [`Self::publier_cycle`].
+    fn publier(
         &self,
         decision_id: &str,
         identite: &str,
@@ -412,6 +418,42 @@ impl Apprenant {
             }
         }
     }
+
+    /// Publication du cycle logique d'attribution : `reserver` (un seul écrivain),
+    /// écrire l'effet durable, puis `confirmer` (succès) ou `echec_recuperable`
+    /// (échec récupérable). Le descripteur de tentative lie la publication à la
+    /// génération réservée : un résultat tardif d'une ancienne tentative ne peut
+    /// pas confirmer une tentative différente.
+    fn publier_cycle(&self, id: u128, attr: &mut Attribution) {
+        let (identite, observation) = {
+            let Some(cycle) = attr.etat(id) else { return };
+            let Some(identite) = cycle.definition.identite.clone() else {
+                return;
+            };
+            let Some(observation) = cycle.observation.clone() else {
+                return;
+            };
+            (identite, observation)
+        };
+        let Some(tentative) = attr.reserver(id) else {
+            return;
+        };
+        let ecriture = self.publier(
+            &id.to_string(),
+            &identite,
+            &observation.fournisseur,
+            &observation.modele,
+            observation.resultat == Resultat::Succes,
+        );
+        match ecriture {
+            Ecriture::Creee | Ecriture::RejeuIdentique | Ecriture::Conflit => {
+                attr.confirmer(id, tentative);
+            }
+            Ecriture::Indetermine | Ecriture::Erreur => {
+                attr.echec_recuperable(id, tentative);
+            }
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -439,7 +481,26 @@ impl Learning for Apprenant {
         self.compteurs.lock().unwrap().decisions += 1;
         match d.class_key() {
             Some(k) => {
-                self.en_cours.lock().unwrap().insert(d.id, k);
+                let definition = Definition {
+                    identite: Some(k),
+                    prevue: d
+                        .chosen
+                        .as_ref()
+                        .map(|p| (p.provider_id.clone(), p.model.clone())),
+                    servie: d
+                        .used
+                        .as_ref()
+                        .map(|p| (p.provider_id.clone(), p.model.clone())),
+                };
+                match self.attribution.lock().unwrap().record(d.id, definition) {
+                    Record::Enregistre => {}
+                    Record::Rejeu => {
+                        self.compteurs.lock().unwrap().rejeux += 1;
+                    }
+                    Record::Conflit => {
+                        self.compteurs.lock().unwrap().conflits += 1;
+                    }
+                }
             }
             None => {
                 // Formation non constituée : aucune identité à attribuer. C'est le
@@ -450,10 +511,6 @@ impl Learning for Apprenant {
     }
 
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
-        let Some(identite) = self.en_cours.lock().unwrap().remove(&id) else {
-            self.compteurs.lock().unwrap().id_absent += 1;
-            return;
-        };
         let Some(p) = served else {
             self.compteurs.lock().unwrap().served_none += 1;
             return;
@@ -466,18 +523,34 @@ impl Learning for Apprenant {
                 return;
             }
         };
-        match self.ecrire_observation(
-            &id.to_string(),
-            &identite,
-            &p.provider_id,
-            &p.model,
-            favorable,
-        ) {
-            Ecriture::Creee | Ecriture::RejeuIdentique => {}
-            Ecriture::Conflit => {
-                panic!("conflit d'observation : même identité, contenu incompatible")
+        let observation = Observation {
+            fournisseur: p.provider_id.clone(),
+            modele: p.model.clone(),
+            resultat: if favorable {
+                Resultat::Succes
+            } else {
+                Resultat::Echec
+            },
+        };
+        let mut attr = self.attribution.lock().unwrap();
+        match attr.recevoir(id, observation) {
+            Reception::Absent => {
+                self.compteurs.lock().unwrap().id_absent += 1;
             }
-            Ecriture::Erreur | Ecriture::Indetermine => {}
+            Reception::Termine => {
+                // Cycle déjà terminal (confirmé ou abandonné) : rien à publier.
+            }
+            Reception::Rejeu => {
+                // Observation déjà reçue, cycle non terminal (`Recu` après un échec
+                // récupérable) : nouvelle tentative de publication, idempotente.
+                self.publier_cycle(id, &mut attr);
+            }
+            Reception::Divergente | Reception::Incompatible => {
+                self.compteurs.lock().unwrap().conflits += 1;
+            }
+            Reception::Recu => {
+                self.publier_cycle(id, &mut attr);
+            }
         }
     }
 }
@@ -707,32 +780,35 @@ fn record_identique_est_un_rejeu_et_record_divergent_est_un_conflit() {
             vector: vec![1.0, 0.0],
         }],
     ));
+    let routeur = routeur_pour(apprenant.clone());
 
-    // Première écriture : créée (effet confirmé).
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-        Ecriture::Creee
-    );
-    // Même identité, même contenu : rejeu, pas de double écriture.
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-        Ecriture::RejeuIdentique
-    );
-    // Même identité, contenu divergent : conflit, pas d'écrasement.
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", false),
-        Ecriture::Conflit
-    );
+    let dec = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    assert_eq!(dec.cognitive_class.as_deref(), Some("repr.K1"));
+    let pick = dec.used.clone().unwrap();
+
+    // Premier cycle complet : record → settle (créé, effet confirmé).
+    executer(apprenant.record(&dec));
+    executer(apprenant.settle(dec.id, Some(&pick), &Stop::Done, None));
+    assert_eq!(apprenant.compter_observations(), 1);
+
+    // record identique : rejeu, pas de double écriture.
+    executer(apprenant.record(&dec));
+
+    // record divergent (même identifiant, identité différente) : conflit, sans
+    // écrasement de l'état d'origine.
+    let mut divergent = dec.clone();
+    divergent.cognitive_class = Some("repr.K2".into());
+    executer(apprenant.record(&divergent));
 
     let tuples = apprenant.tuples();
     assert_eq!(tuples.len(), 1, "ni double écriture ni écrasement");
     assert_eq!(
         tuples[0],
         (
-            "dec-1".to_string(),
+            dec.id.to_string(),
             "repr.K1".to_string(),
-            "a".to_string(),
-            "m1".to_string(),
+            pick.provider_id,
+            pick.model,
             true,
         ),
         "le premier tuple est conservé"
@@ -743,6 +819,7 @@ fn record_identique_est_un_rejeu_et_record_divergent_est_un_conflit() {
     assert_eq!(c.conflits, 1);
 
     store.commit_wal().expect("flush");
+    drop(routeur);
     drop(apprenant);
     drop(store);
     let _ = std::fs::remove_dir_all(&d);
@@ -811,23 +888,27 @@ fn echec_d_ecriture_puis_recuperation() {
             vector: vec![1.0, 0.0],
         }],
     ));
+    let routeur = routeur_pour(apprenant.clone());
     let authority = FileAuthority::new(d.as_path());
     store
         .enable_write_fencing_with(&authority)
         .expect("bail armé");
 
+    // Deux décisions distinctes, même identité constituée.
+    let dec1 = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    let dec2 = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    let pick1 = dec1.used.clone().unwrap();
+    let pick2 = dec2.used.clone().unwrap();
+
     // Témoin : le détenteur du bail écrit.
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-        Ecriture::Creee
-    );
+    executer(apprenant.record(&dec1));
+    executer(apprenant.settle(dec1.id, Some(&pick1), &Stop::Done, None));
+    assert_eq!(apprenant.compter_observations(), 1);
 
     // Un autre écrivain a repris le shard : celui-ci est périmé.
     store.fence_write_lease_for_test(2);
-    assert_eq!(
-        apprenant.ecrire_observation("dec-2", "repr.K1", "a", "m1", true),
-        Ecriture::Erreur
-    );
+    executer(apprenant.record(&dec2));
+    executer(apprenant.settle(dec2.id, Some(&pick2), &Stop::Done, None));
 
     // L'échec n'est PAS compté comme une création, et ne laisse rien dans Obrain.
     assert_eq!(
@@ -839,18 +920,16 @@ fn echec_d_ecriture_puis_recuperation() {
     assert_eq!(c.creees, 1);
     assert_eq!(c.erreurs, 1, "l'échec est compté dans `erreurs`");
 
-    // Récupération : le bail est rendu, la même écriture passe.
+    // Récupération : le bail est rendu, la même publication passe.
     store.release_write_fencing();
-    assert_eq!(
-        apprenant.ecrire_observation("dec-2", "repr.K1", "a", "m1", true),
-        Ecriture::Creee
-    );
+    executer(apprenant.settle(dec2.id, Some(&pick2), &Stop::Done, None));
     assert_eq!(apprenant.compter_observations(), 2);
     let c2 = apprenant.compteurs();
     assert_eq!(c2.creees, 2, "la tentative rattrapée crée");
     assert_eq!(c2.erreurs, 1, "l'échec passé reste compté");
 
     store.commit_wal().expect("flush");
+    drop(routeur);
     drop(apprenant);
     drop(store);
     let _ = std::fs::remove_dir_all(&d);
@@ -872,15 +951,16 @@ fn resultat_indetermine_n_est_pas_un_effet_confirme() {
             vector: vec![1.0, 0.0],
         }],
     ));
+    let routeur = routeur_pour(apprenant.clone());
+    let dec = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+    let pick = dec.used.clone().unwrap();
 
     // La lecture de déduplication échoue : l'issue est INDÉTERMINÉE. On ne peut
     // pas savoir si l'identifiant existe, et on ne prétend ni « absent » (qui
     // écrirait un doublon) ni « présent ».
     apprenant.lecture_en_echec.store(true, Ordering::Relaxed);
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-        Ecriture::Indetermine
-    );
+    executer(apprenant.record(&dec));
+    executer(apprenant.settle(dec.id, Some(&pick), &Stop::Done, None));
     apprenant.lecture_en_echec.store(false, Ordering::Relaxed);
 
     // L'indétermination n'est PAS un effet confirmé : rien d'écrit, rien compté
@@ -894,14 +974,12 @@ fn resultat_indetermine_n_est_pas_un_effet_confirme() {
     assert_eq!(c.creees, 0, "l'indétermination n'est pas une création");
     assert_eq!(c.indetermines, 1, "…mais elle est nommée");
 
-    // La lecture est rétablie : la même écriture passe, une seule fois.
-    assert_eq!(
-        apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-        Ecriture::Creee
-    );
+    // La lecture est rétablie : la même publication passe, une seule fois.
+    executer(apprenant.settle(dec.id, Some(&pick), &Stop::Done, None));
     assert_eq!(apprenant.compter_observations(), 1);
 
     store.commit_wal().expect("flush");
+    drop(routeur);
     drop(apprenant);
     drop(store);
     let _ = std::fs::remove_dir_all(&d);
@@ -924,19 +1002,24 @@ fn fermeture_reouverture_conserve_les_tuples_complets() {
     {
         let store = ObrainStore::open(&d).expect("ouverture");
         let apprenant = Rc::new(Apprenant::nouveau(store.clone(), scope, prototypes.clone()));
-        // Deux observations distinctes : décisions, fournisseurs, modèles et
-        // résultats différents.
-        assert_eq!(
-            apprenant.ecrire_observation("dec-1", "repr.K1", "a", "m1", true),
-            Ecriture::Creee
-        );
-        assert_eq!(
-            apprenant.ecrire_observation("dec-2", "repr.K1", "b", "m2", false),
-            Ecriture::Creee
-        );
+        let routeur = routeur_pour(apprenant.clone());
+
+        // Deux décisions distinctes, deux résultats différents : des tuples
+        // complets et distinguables par `decision_id` et `resultat`.
+        let dec1 = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+        let dec2 = executer(routeur.route(tour("A"))).decision.clone().unwrap();
+        let pick1 = dec1.used.clone().unwrap();
+        let pick2 = dec2.used.clone().unwrap();
+
+        executer(apprenant.record(&dec1));
+        executer(apprenant.settle(dec1.id, Some(&pick1), &Stop::Done, None));
+        executer(apprenant.record(&dec2));
+        executer(apprenant.settle(dec2.id, Some(&pick2), &Stop::Failed("panne".into()), None));
+
         attendu = apprenant.tuples();
         assert_eq!(attendu.len(), 2);
         store.commit_wal().expect("flush");
+        drop(routeur);
         drop(apprenant);
         drop(store);
     }
