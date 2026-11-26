@@ -63,6 +63,27 @@ pub struct Tentative {
     generation: u64,
 }
 
+impl Tentative {
+    /// L'autorité émettrice de ce descripteur. Distincte d'une identité de base
+    /// durable : deux instances issues du même programme portent des valeurs
+    /// différentes, et rien ne relie cette valeur à une base physique.
+    pub fn autorite(&self) -> u64 {
+        self.autorite
+    }
+
+    /// La génération de la réservation : incrémentée à chaque réservation. Un
+    /// descripteur d'une génération antérieure ne résout pas un cycle réservé à
+    /// nouveau.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// L'identifiant de la décision liée à ce descripteur.
+    pub fn decision_id(&self) -> u128 {
+        self.decision_id
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Cycle {
     pub definition: Definition,
@@ -123,6 +144,12 @@ impl Default for Attribution {
 impl Attribution {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// L'identité d'écrivain de cette instance (unique par instance). C'est une
+    /// autorité d'écrivain, PAS une identité de base durable.
+    pub fn autorite(&self) -> u64 {
+        self.autorite
     }
 
     pub fn record(&mut self, id: u128, definition: Definition) -> Record {
