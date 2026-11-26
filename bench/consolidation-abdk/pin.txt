@@ -1,0 +1,22 @@
+# Pin Obrain — déclaré / résolu / verrouillé (cargo metadata, EXIT=0)
+SHA this-rs = 2c986697593d1a7c07b45a3bcde6f7a3581abacb
+
+## Cargo.toml (déclaré)
+126:obrain-engine = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true, features = ["algos"] }
+127:obrain-common = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true }
+128:obrain-core = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true, default-features = false }
+133:obrain-substrate = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true }
+140:obrain-adapters = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true, default-features = false }
+144:obrain-reactive = { version = "0.0.1", git = "file:///Users/triviere/projects/obrain/obrain-db", rev = "dabcf91d38a6d779dea674b2f31007112971e5cf", optional = true }
+
+## cargo metadata (RÉSOLU)
+obrain-adapters v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+obrain-common v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+obrain-core v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+obrain-engine v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+obrain-reactive v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+obrain-substrate v0.0.1 git+file:///Users/triviere/projects/obrain/obrain-db?rev=dabcf91d38a6d779dea674b2f31007112971e5cf#dabcf91d38a6d779dea674b2f31007112971e5cf
+
+## Cargo.lock (verrouillé) — suivi par git ?
+erreur : le spécificateur de chemin 'Cargo.lock' ne correspond à aucun fichier connu de git
+.gitignore:8:Cargo.lock	Cargo.lock

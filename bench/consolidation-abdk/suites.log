@@ -1,0 +1,35 @@
+# Consolidation A/B/D/K — suites réunies sur un SHA COMMUN (arbre COMMITÉ)
+
+SHA this-rs mesuré = 2c986697593d1a7c07b45a3bcde6f7a3581abacb
+git status (hors journal) = 0 fichier(s) modifié(s)
+toolchain = rustc 1.100.0 (0ef1bc386 2026-11-09)
+features   = obrain   (CARGO_TARGET_DIR=_wt-abdk-target)
+date UTC   = 2026-11-26T17:30:58Z
+
+--- clippy ---
+EXIT[clippy -D warnings]=0
+--- unit (lib) ---
+test result: ok. 1364 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 31.28s
+EXIT[lib]=0
+
+### reconciliation_composant
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+EXIT[reconciliation_composant]=0
+### h3_v2_cycle_harness
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
+EXIT[h3_v2_cycle_harness]=0
+### h3_v2_chaine_autorite
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+EXIT[h3_v2_chaine_autorite]=0
+### k_durable_autorite
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+EXIT[k_durable_autorite]=0
+### durabilite_obrr
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.70s
+EXIT[durabilite_obrr]=0
+### k_allocation_atomique
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+EXIT[k_allocation_atomique]=0
+### k_collision_concurrente
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+EXIT[k_collision_concurrente]=0

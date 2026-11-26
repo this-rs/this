@@ -1,0 +1,10 @@
+### clippy -p this-rs --features obrain --all-targets -- -D warnings
+86 | tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `tracing-subscriber`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `this-rs` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.01s
+EXIT[clippy]=0

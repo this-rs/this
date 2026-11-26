@@ -1,0 +1,6 @@
+### cargo test -p this-rs --features obrain --lib
+test storage::iam::perimeter::a_batch_matches_individual_calls_exactly_at_every_batch_size ... ok
+
+test result: ok. 1364 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 31.08s
+
+EXIT[lib]=0
