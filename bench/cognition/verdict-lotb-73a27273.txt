@@ -1,0 +1,14 @@
+# Verdict — Lot B : durabilité OBRR intégrale + versionnement V1/V2 croisé
+commit = 73a27273aea5330502674644bb890d2f889abffd
+parent = 7e5732b9f3311513b0c130e4719ff906f8033a9e (référence commune c7a25ac5)
+obrain = 89d169d7d481c59018b712d499b8180c384fd405
+sha256(Cargo.lock) = 3eb6502836f7fefe898bbe8b02fd43b4ceebb61fc683a49a4ca62b93dd49fe5e
+rustc = 1.97.1 (toolchain « stable »)
+ENREGISTREMENT_VERSION = 2 (lecture legacy V1 en quarantaine, jamais migrée)
+commande = cargo test --features obrain,objects-toolbox --test concurrence_g1g5 --test h3_v2_cycle_harness --test h3_v2_chaine_autorite --test reconciliation_composant --test durabilite_obrr ; cargo test -p this-harness --test modele_causal
+résultats = G1-G5 5 | durabilité 15 (dont 4 processus enfants réels) | H3 chaîne 7 | H3 cycle 5 | composant 2 | A-2 20 = 54 verts, 0 failed, EXIT=0
+mesures = témoin non atomique tué : 8/14, 11/14, 9/14 records tronqués ; écrivain durable tué : 0/14 sur 3 exécutions
+           autorité d'Attribution réémise = 1 dans deux processus distincts (collision)
+           mort abrupte avant publication : intégrité Indeterminee, verdict Indetermine
+           n_effets = 2^32-1 : refus nommé avant allocation (128 Gio annoncés, 0 alloués)
+non mesuré = survie à une coupure d'alimentation ; authenticité (format non signé)
