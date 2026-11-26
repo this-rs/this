@@ -30,7 +30,7 @@ use this_harness::attribution::RésolutionBackend;
 /// Magic des octets d'un enregistrement encodé.
 pub const ENREGISTREMENT_MAGIC: [u8; 4] = *b"OBRR";
 /// Version courante du format d'encodage.
-pub const ENREGISTREMENT_VERSION: u32 = 1;
+pub const ENREGISTREMENT_VERSION: u32 = 2;
 
 /// L'enregistrement original durable du consommateur — la chaîne d'autorité.
 /// Un SEUL bloc cohérent (pas deux fichiers qui peuvent diverger).
