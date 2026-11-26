@@ -67,6 +67,8 @@ pub mod events;
 /// Gated behind `obrain` : sans le moteur, il n'y a pas de relief à décrire.
 #[cfg(feature = "obrain")]
 pub mod graph;
+#[cfg(feature = "obrain")]
+pub mod reconciliation;
 pub mod links;
 /// Couche objets (blobs S3/MinIO/local) préfixée par tenant.
 #[cfg(feature = "objects")]
