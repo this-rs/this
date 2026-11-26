@@ -1288,12 +1288,7 @@ impl Exploration {
     fn meme_verdict_deux_backends(&self) -> Option<(usize, Action, Action)> {
         let index = self.index();
         for (i, noeud) in self.noeuds.iter().enumerate() {
-            if !noeud
-                .monde
-                .cycles
-                .values()
-                .any(|c| c.vivante.is_some())
-            {
+            if !noeud.monde.cycles.values().any(|c| c.vivante.is_some()) {
                 continue;
             }
             for (d, c) in &noeud.monde.cycles {
