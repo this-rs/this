@@ -193,3 +193,89 @@ fn un_rejeu_du_meme_identifiant_n_ecrit_pas_deux_fois() {
         "rejeu ne doit pas nourrir deux fois : {ecrites:?}"
     );
 }
+
+/// Un apprenant qui ne constitue JAMAIS de connaissance : chaque représentation
+/// est une proposition de formation non enregistrée (`class: None`). Il sert à
+/// prouver qu'aucune observation cognitive commune n'est écrite en Obrain.
+struct SansEnregistrement {
+    en_cours: Mutex<HashMap<u128, String>>,
+    ecrites: Mutex<usize>,
+}
+
+#[async_trait(?Send)]
+impl Learning for SansEnregistrement {
+    async fn classify(&self, _repr: &TaskRepr) -> Classification {
+        Classification {
+            class: None,
+            formation: Some(this_harness::cognition::Formation {
+                projection: this_harness::cognition::ProjectionKey("repr.p".into()),
+                vector: Vec::new(),
+                similarity: None,
+            }),
+            uncertainty: Uncertainty::Formed(0.0),
+            nearest: None,
+            similarity: None,
+        }
+    }
+    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
+        vec![
+            ArmStats::fresh(ArmKey::new(classe, "a", "m1"), 1.0, 1.0),
+            ArmStats::fresh(ArmKey::new(classe, "b", "m2"), 1.0, 1.0),
+        ]
+    }
+    async fn record(&self, d: &Decision) {
+        if let Some(c) = d.class_key() {
+            self.en_cours.lock().unwrap().insert(d.id, c);
+        }
+    }
+    async fn settle(&self, id: u128, served: Option<&Pick>, _stop: &Stop, _code: Option<&str>) {
+        let classe = self.en_cours.lock().unwrap().remove(&id);
+        if let (Some(_c), Some(_p)) = (classe, served) {
+            *self.ecrites.lock().unwrap() += 1;
+        }
+    }
+}
+
+#[test]
+fn deux_formations_non_enregistrees_n_ecrivent_aucune_observation() {
+    let mem = Rc::new(SansEnregistrement {
+        en_cours: Mutex::new(HashMap::new()),
+        ecrites: Mutex::new(0),
+    });
+    let pool = Rc::new(MemoryPool::new(vec![cand("a", "m1"), cand("b", "m2")]));
+    let routeur = TurnRouter::new(
+        RouterSpec::new(
+            pool,
+            Rc::new(SequenceSeeds::from(1)),
+            "a".to_string(),
+            "m1".to_string(),
+        )
+        .learning(mem.clone())
+        .encoder(Rc::new(Enc))
+        .auto()
+        .settings(RoutingSettings {
+            exploration_epsilon: 0.0,
+            ..Default::default()
+        }),
+    );
+
+    // Deux représentations distinctes (A et B), toutes deux des formations non
+    // enregistrées : route → record → settle.
+    for texte in ["A", "B"] {
+        let routed = run(routeur.route(tour(texte)));
+        let Some(dec) = routed.decision.clone() else {
+            continue;
+        };
+        run(routeur.record(&dec));
+        run(routeur.settle(&Stop::Done, None, true));
+    }
+
+    // Aucune observation cognitive commune : `class_key()` est None, `record`
+    // n'insère rien, `settle` n'écrit rien. Ni repr.unknown, ni chat.general,
+    // ni une identité vide.
+    assert_eq!(
+        *mem.ecrites.lock().unwrap(),
+        0,
+        "aucune observation cognitive commune ne doit être écrite"
+    );
+}
