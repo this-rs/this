@@ -142,7 +142,7 @@ obrain-adapters = { version = "0.0.1", git = "https://github.com/obrain-db/obrai
 # `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
 # recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
 obrain-reactive = { version = "0.0.1", git = "https://github.com/obrain-db/obrain", rev = "b45ad2007ab717c8cf97f97c328fa6985fe01172", optional = true }
-obrain-cognitive = { version = "0.0.1", git = "https://github.com/obrain-db/obrain", rev = "b45ad2007ab717c8cf97f97c328fa6985fe01172", optional = true, default-features = false, features = ["engram"] }
+obrain-cognitive = { version = "0.0.1", git = "https://github.com/obrain-db/obrain", rev = "b45ad2007ab717c8cf97f97c328fa6985fe01172", optional = true, default-features = false, features = ["engram", "substrate"] }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules + guaranteed cache
