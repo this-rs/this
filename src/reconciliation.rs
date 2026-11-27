@@ -37,6 +37,10 @@
 //! - `ReferenceTentative` est en codec **v2** : elle porte le `domaine_id`
 //!   NATIF (u128, `domaine()`), encodé dans `to_bytes`. Une référence v1
 //!   (legacy) décodée rend `domaine() == 0` (« domaine non spécifié »).
+//!   La garde native qui en découle (`resoudre_reference` : domaine étranger →
+//!   `Indeterminee`) répond « cette référence appartient-elle à CE store ? »,
+//!   PAS « ce store est-il celui que je visais ». Le second trou se ferme côté
+//!   consommateur (`verifier_domaine_attendu`, `resoudre_operation_sous_domaine`).
 //! - `EffetResolu` est la SOURCE DE VÉRITÉ unique : `estampille_courante()` et
 //!   `valeur_courante()` sont des ACCESSOIRS dérivés de `etat_courant` (plus
 //!   aucun champ redondant).
@@ -424,9 +428,14 @@ impl EnregistrementOriginal {
 /// référence), écrivain résolvant, correspondance résolution ↔ référence PAR CLÉ
 /// (substitution de la résolution), puis intégrité + état courant + compatibilité.
 ///
-/// LIMITE (collision HLC, obrain 62ecd940) : cette fonction ne vérifie PAS le
-/// domaine de stockage (`enr.domaine`) — la référence ne le porte pas, `res` non
-/// plus. La preuve du domaine est HORS-BANDE, responsabilité du consommateur.
+/// LIMITE (domaine de stockage) : cette fonction ne vérifie PAS que le store
+/// interrogé est la base VISÉE. `enr.domaine` est un label `String`, il n'est
+/// pas comparé, et `res` ne porte aucune identité de domaine. La garde native du
+/// substrate refuse une référence ÉTRANGÈRE au store — ce qui ne dit rien de
+/// l'intention : une référence de B, un enregistrement B et un store B sont
+/// cohérents entre eux et confirment. Le consommateur ajoute donc
+/// `verifier_domaine_attendu` / `resoudre_operation_sous_domaine`, dont la
+/// source est l'intention (hors-bande), pas les octets.
 pub fn reconcilier(
     enr: &EnregistrementOriginal,
     reference: &ReferenceTentative,
@@ -617,6 +626,150 @@ pub fn resoudre_operation(
     match verdict.vers_backend() {
         Some(backend) => IssueResolutionOperation::Resolu(attr.resoudre(id, tentative, backend)),
         None => IssueResolutionOperation::VerdictNuance(verdict),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Garde du DOMAINE ATTENDU : ce que la garde native ne peut PAS voir
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// La garde NATIVE du substrate (`SubstrateStore::resoudre_reference`) répond à
+// UNE question : « cette référence appartient-elle à CE store ? ». Elle rend
+// `Indeterminee` si `reference.domaine()` diffère du `domaine_id` du store.
+//
+// Elle ne peut pas répondre à la question du consommateur : « CE store est-il
+// celui que je visais ? ». Une référence de B, un enregistrement de B et un
+// store B sont TROIS FOIS cohérents entre eux ; la garde native accepte, et
+// `reconcilier` rend `Confirme` — alors que l'intention était A. Ce n'est pas un
+// défaut du substrate : le substrat n'a jamais reçu l'intention. C'est un trou
+// du CONSOMMATEUR, et il se ferme ici, avec une valeur que rien dans la chaîne
+// ne peut fournir à sa place.
+//
+// Source INDÉPENDANTE du domaine attendu — l'intention du consommateur,
+// hors-bande. Aucune des trois autres sources ne peut la remplacer :
+// - les OCTETS de la référence (OBRT v2) portent `domaine_id`, mais ils sont
+//   cohérents avec eux-mêmes par construction : une référence de B est valide
+//   dans B. L'égalité d'octets (`reconcilier`, étape L2) ne dit rien de
+//   l'origine VISÉE ;
+// - `EnregistrementOriginal::domaine` est un LABEL `String` : un nom n'est pas
+//   une identité, et il est recopié avec la base qu'il nomme (mesuré :
+//   `tests/reconciliation_composant.rs`, `composant_domaine_est_hors_bande`) ;
+// - `writer.id` ne discrimine pas les bases (collision HLC, obrain 62ecd940).
+//
+// LIMITE ASSUMÉE (nommée, pas contournée) : une copie INTÉGRALE non déclarée
+// d'une base porte le MÊME `domaine_id` (le domaine suit les fichiers, pas le
+// chemin — `obrain_substrate::domaine_id`). Cette garde sépare deux bases
+// INDÉPENDANTES ; séparer une base de sa copie exige un fork DÉCLARÉ côté
+// substrate, hors du périmètre de ce module.
+
+/// Issue de la garde de domaine attendu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueDomaineAttendu {
+    /// Le store ouvert EST la base visée : `domaine_id` natif identique.
+    Concorde,
+    /// Le store ouvert N'EST PAS la base visée. Aucun contenu n'a été consulté
+    /// pour le dire : la comparaison porte sur deux identités natives.
+    Etranger { attendu: u128, courant: u128 },
+    /// Le store ouvert n'expose pas d'identité de domaine (`domaine_id == 0`,
+    /// domaine non spécifié). Rien ne peut attester : ce n'est jamais une
+    /// confirmation.
+    SansIdentite { attendu: u128 },
+}
+
+/// L'AUTORITÉ INDÉPENDANTE du domaine attendu : le store effectivement ouvert
+/// et l'identité native de la base que le consommateur VISEAIT.
+///
+/// C'est une valeur, pas un paramètre libre : nommer l'autorité oblige à dire
+/// D'OÙ vient l'attendu. `attendu` est fourni par l'appelant — la base qu'il a
+/// décidé d'ouvrir — et JAMAIS lu dans la référence ni dans l'enregistrement.
+pub struct DomaineAttendu<'a> {
+    /// Le store EFFECTIVEMENT ouvert : son identité native est lue ici.
+    pub store: &'a SubstrateStore,
+    /// L'identité native de la base VISÉE. `0` = « je ne sais pas quelle base je
+    /// visais », et une intention inconnue n'autorise rien.
+    pub attendu: u128,
+}
+
+impl DomaineAttendu<'_> {
+    /// Construit l'autorité attendue : le store ouvert + l'intention.
+    pub fn nouveau(store: &SubstrateStore, attendu: u128) -> DomaineAttendu<'_> {
+        DomaineAttendu { store, attendu }
+    }
+
+    /// Applique la garde (voir [`verifier_domaine_attendu`]).
+    pub fn verifier(&self) -> IssueDomaineAttendu {
+        verifier_domaine_attendu(self.store, self.attendu)
+    }
+}
+
+/// Compare l'identité de domaine ATTENDUE (autorité indépendante : l'intention
+/// du consommateur, hors-bande) à l'identité NATIVE du store effectivement
+/// ouvert (`SubstrateStore::domaine_id`).
+///
+/// `domaine_attendu` vient de l'appelant — la base qu'il a décidé d'ouvrir — et
+/// JAMAIS de la référence ni de l'enregistrement (voir l'en-tête de section).
+/// `domaine_attendu == 0` (« je ne sais pas quelle base je visais ») est REFUSÉ
+/// (`Etranger`) : une intention inconnue n'autorise rien.
+pub fn verifier_domaine_attendu(
+    store: &SubstrateStore,
+    domaine_attendu: u128,
+) -> IssueDomaineAttendu {
+    let courant = store.domaine_id();
+    if courant == 0 {
+        return IssueDomaineAttendu::SansIdentite {
+            attendu: domaine_attendu,
+        };
+    }
+    if courant == domaine_attendu {
+        IssueDomaineAttendu::Concorde
+    } else {
+        IssueDomaineAttendu::Etranger {
+            attendu: domaine_attendu,
+            courant,
+        }
+    }
+}
+
+/// Issue du chemin opérationnel SOUS domaine attendu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueResolutionSousDomaine {
+    /// Le store n'est pas la base visée : refus AVANT `verifier_liaison`,
+    /// AVANT `reconcilier`, AVANT toute transition `Attribution::resoudre`.
+    /// C'est exactement le cas que la garde native ne voit pas (référence B,
+    /// enregistrement B, store B, intention A).
+    DomaineEtranger { attendu: u128, courant: u128 },
+    /// Store sans identité native : rien ne peut attester le domaine.
+    DomaineSansIdentite { attendu: u128 },
+    /// Domaine concordant : `resoudre_operation` s'applique sans changement.
+    Operation(IssueResolutionOperation),
+}
+
+/// Chemin opérationnel COMPLET : garde de domaine attendu, PUIS
+/// `resoudre_operation` (liaison → réconciliation → résolution).
+///
+/// La garde passe en PREMIER : une confirmation contraire à l'intention ne doit
+/// pas même être calculée, et aucune transition du cycle ne doit avoir lieu.
+/// Ce n'est pas un second moteur : le domaine ne s'ajoute pas au verdict de
+/// réconciliation, il le PRÉCÈDE.
+pub fn resoudre_operation_sous_domaine(
+    domaine: &DomaineAttendu<'_>,
+    attr: &mut Attribution,
+    id: u128,
+    tentative: Tentative,
+    enr: &EnregistrementOriginal,
+    reference: &ReferenceTentative,
+    res: &ResolutionTentative,
+) -> IssueResolutionSousDomaine {
+    match domaine.verifier() {
+        IssueDomaineAttendu::Concorde => IssueResolutionSousDomaine::Operation(resoudre_operation(
+            attr, id, tentative, enr, reference, res,
+        )),
+        IssueDomaineAttendu::Etranger { attendu, courant } => {
+            IssueResolutionSousDomaine::DomaineEtranger { attendu, courant }
+        }
+        IssueDomaineAttendu::SansIdentite { attendu } => {
+            IssueResolutionSousDomaine::DomaineSansIdentite { attendu }
+        }
     }
 }
 
