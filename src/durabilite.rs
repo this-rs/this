@@ -89,7 +89,14 @@ pub fn ecrire_durable_observe(
         observe(EtapeEcriture::Renomme);
         // Le NOM du fichier après le rename : sans cela l'entrée de répertoire
         // peut être perdue, et le record avec elle.
-        std::fs::File::open(dossier)?.sync_all()?;
+        // POSIX uniquement : sous Windows, `File::open` sur un RÉPERTOIRE renvoie
+        // ERROR_ACCESS_DENIED (il faudrait FILE_FLAG_BACKUP_SEMANTICS). Le journal
+        // NTFS garantit la durabilité du nom autrement ; on n'émet donc pas de
+        // sync_all explicite sur Windows, mais l'étape reste observable.
+        #[cfg(unix)]
+        {
+            std::fs::File::open(dossier)?.sync_all()?;
+        }
         observe(EtapeEcriture::RepertoireSynchronise);
         Ok(())
     })();
