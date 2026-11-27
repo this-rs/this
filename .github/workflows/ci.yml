@@ -903,6 +903,25 @@ jobs:
           # `::` en fin de scalaire simple fait de la ligne une clé pour YAML : bloc.
           cargo test -p this-rs --features obrain --lib storage::
 
+      # La tranche mémoire (27/11/2026) : le service `memoire` et son adaptateur
+      # natif sont gatés par `obrain-cognitive` (qui implique `obrain`), pas par
+      # `obrain` seul. Le job `all,wami` ne lève pas `obrain-cognitive`, et le
+      # `--lib storage::` ci-dessus n'exécute ni `--lib memoire` ni les cibles
+      # d'intégration. Deux étapes explicites, séparant le filtre unitaire des cibles.
+      - name: Test le service mémoire (unitaire, obrain-cognitive)
+        run: cargo test -p this-rs --features "obrain obrain-cognitive" --lib memoire
+
+      - name: Test les témoins mémoire d'intégration (obrain-cognitive)
+        run: |
+          cargo test -p this-rs --features "obrain obrain-cognitive" \
+            --test substrate_ouverture \
+            --test fait_mutation_native \
+            --test parcours_memoire \
+            --test parcours_deux_processus \
+            --test reprise_memoire \
+            --test ledger_natif_exporte \
+            -- --test-threads=1
+
       # La lacune CI mesurée le 26/11/2026 (lot E) : les 4 cibles de cognition
       # l3_persistance / l3_routeur / l4_routeur_natif / l4_transfert_relationnel
       # portent `#![cfg(all(feature = "obrain", feature = "objects-toolbox"))]`.
