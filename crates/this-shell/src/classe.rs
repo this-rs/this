@@ -210,6 +210,9 @@ pub enum Refus {
     Borne(&'static str, &'static str),
     /// Ce moteur ne peut pas exécuter ici (pas de processus, pas de pair, pas de wasmi).
     MoteurIndisponible(Moteur),
+    /// Le programme n'a pas pu être lancé du tout (absent, non exécutable, répertoire
+    /// disparu). Ce n'est pas un refus de droit : c'est un échec, et il se dit autrement.
+    Lancement(String),
 }
 
 impl fmt::Display for Refus {
@@ -228,6 +231,9 @@ impl fmt::Display for Refus {
             Refus::Borne(champ, motif) => write!(f, "refusé : borne « {champ} » — {motif}"),
             Refus::MoteurIndisponible(moteur) => {
                 write!(f, "refusé : le moteur {moteur} est indisponible ici")
+            }
+            Refus::Lancement(motif) => {
+                write!(f, "échec : le programme n'a pas pu être lancé — {motif}")
             }
         }
     }
