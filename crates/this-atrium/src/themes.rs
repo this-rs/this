@@ -4,7 +4,7 @@
 //! amis…). Cette table est le seul endroit où un nom de thème devient un ensemble de
 //! droits. Un thème inconnu ne porte **aucun** droit : deny par défaut, en Rust pur.
 
-use crate::profil::Profil;
+use crate::profil::{Portee, Profil};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -33,13 +33,15 @@ impl Themes {
         self.profils.get(theme)
     }
 
-    /// Vrai si le thème `theme` accorde `(service, operation)`.
+    /// Vrai si le thème `theme` accorde `(service, operation)` DANS cette portée.
     ///
-    /// Deny par défaut, à deux étages : thème inconnu → `false` ; thème connu mais aucun
-    /// grant du profil ne couvre la demande → `false`.
-    pub fn autorise(&self, theme: &str, service: &str, operation: &str) -> bool {
+    /// Deny par défaut, à trois étages : thème inconnu → `false` ; thème connu mais aucun
+    /// grant du profil ne couvre la demande → `false` ; grant qui couvre l'opération mais
+    /// pas la portée demandée → `false`. La portée fait partie de la demande : depuis le
+    /// 27/11/2026, elle n'est plus décorative (voir `profil::Grant::couvre`).
+    pub fn autorise(&self, theme: &str, service: &str, operation: &str, portee: &Portee) -> bool {
         match self.profil_de(theme) {
-            Some(profil) => profil.autorise(service, operation),
+            Some(profil) => profil.autorise(service, operation, portee),
             None => false,
         }
     }
@@ -68,7 +70,12 @@ mod tests {
         let mut themes = Themes::nouveau();
         themes.definir("famille", profil_famille());
 
-        assert!(themes.autorise("famille", "liste", "lire"));
+        assert!(themes.autorise(
+            "famille",
+            "liste",
+            "lire",
+            &Portee::Nommee("famille".into())
+        ));
         assert_eq!(
             themes.profil_de("famille").map(|p| p.nom.as_str()),
             Some("famille")
@@ -80,8 +87,18 @@ mod tests {
         let mut themes = Themes::nouveau();
         themes.definir("famille", profil_famille());
 
-        assert!(!themes.autorise("famille", "liste", "vider"));
-        assert!(!themes.autorise("famille", "photos", "lire"));
+        assert!(!themes.autorise(
+            "famille",
+            "liste",
+            "vider",
+            &Portee::Nommee("famille".into())
+        ));
+        assert!(!themes.autorise(
+            "famille",
+            "photos",
+            "lire",
+            &Portee::Nommee("famille".into())
+        ));
     }
 
     #[test]
@@ -89,15 +106,20 @@ mod tests {
         let mut themes = Themes::default();
         themes.definir("famille", profil_famille());
 
-        assert!(!themes.autorise("amis", "liste", "lire"));
-        assert!(!themes.autorise("amis", JOKER, JOKER));
+        assert!(!themes.autorise("amis", "liste", "lire", &Portee::Nommee("famille".into())));
+        assert!(!themes.autorise("amis", JOKER, JOKER, &Portee::Tout));
         assert_eq!(themes.profil_de("amis"), None);
     }
 
     #[test]
     fn une_table_vide_refuse_tout() {
         let themes = Themes::nouveau();
-        assert!(!themes.autorise("famille", "liste", "lire"));
+        assert!(!themes.autorise(
+            "famille",
+            "liste",
+            "lire",
+            &Portee::Nommee("famille".into())
+        ));
     }
 
     #[test]
@@ -121,6 +143,11 @@ mod tests {
             themes.profil_de("famille").map(|p| p.nom.as_str()),
             Some("famille-v2")
         );
-        assert!(themes.autorise("famille", "liste", "vider"));
+        assert!(themes.autorise(
+            "famille",
+            "liste",
+            "vider",
+            &Portee::Nommee("famille".into())
+        ));
     }
 }
