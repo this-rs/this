@@ -53,9 +53,27 @@ pub const PROP_PROJET: &str = "projet";
 /// rend ici. Un adaptateur qui ne tient RIEN doit le dire en rendant `None` — jamais en
 /// prétendant que tout va bien.
 pub trait SanteEcriture {
-    /// Le dernier échec d'écriture non résolu, s'il y en a un.
-    fn derniere_erreur(&self) -> Option<String>;
+    /// Ouvre une opération : l'adaptateur réserve désormais une place d'erreur pour CETTE
+    /// opération, et cesse d'attribuer les échecs au dernier appel venu.
+    ///
+    /// Appelé par le service AVANT la mutation. Une implémentation qui ne fait rien ici
+    /// (« drapeau global ») ne satisfait PAS ce contrat : sous concurrence, deux opérations
+    /// simultanées partageraient la même erreur, et l'une des deux serait confirmée à tort
+    /// ou refusée à tort. C'est ce que `deux_operations_concurrentes_ne_partagent_pas_leur_erreur`
+    /// mesure.
+    fn ouvre(&self, operation: Operation);
+
+    /// L'échec de CETTE opération, s'il y en a un — jamais « le dernier échec en date ».
+    fn erreur_de(&self, operation: Operation) -> Option<String>;
 }
+
+/// L'identité d'une opération du service, unique par appel.
+///
+/// Elle n'est PAS un identifiant logique de reprise : c'est une clé de corrélation locale qui
+/// permet d'attribuer une erreur à l'opération qui l'a produite. L'identité de reprise
+/// (T3/OBRR) est une autre affaire, et ce service ne la fabrique pas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Operation(pub u64);
 
 /// Une santé qui ne sait rien : `None` toujours. Réservé aux tests et aux adaptations qui
 /// n'ont réellement aucun canal d'erreur — elle n'est PAS un « tout va bien » implicite :
@@ -63,7 +81,8 @@ pub trait SanteEcriture {
 pub struct SansSante;
 
 impl SanteEcriture for SansSante {
-    fn derniere_erreur(&self) -> Option<String> {
+    fn ouvre(&self, _operation: Operation) {}
+    fn erreur_de(&self, _operation: Operation) -> Option<String> {
         None
     }
 }
@@ -124,12 +143,24 @@ pub struct Rappel {
 pub struct Memoire {
     stockage: Arc<dyn CognitiveStorage>,
     sante: Arc<dyn SanteEcriture>,
+    prochaine: std::sync::atomic::AtomicU64,
 }
 
 impl Memoire {
     /// Un service sur un store déjà ouvert par l'application.
     pub fn new(stockage: Arc<dyn CognitiveStorage>, sante: Arc<dyn SanteEcriture>) -> Self {
-        Self { stockage, sante }
+        Self {
+            stockage,
+            sante,
+            prochaine: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn operation(&self) -> Operation {
+        Operation(
+            self.prochaine
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Enregistre un fait fourni par la personne, et ne le DIT que s'il a été relu.
@@ -151,49 +182,76 @@ impl Memoire {
         proprietes.insert(PROP_TEXTE.to_string(), Value::from(texte));
         proprietes.insert(PROP_PROJET.to_string(), Value::from(projet));
 
+        let operation = self.operation();
+        self.sante.ouvre(operation);
         let id = self.stockage.create_node(LABEL_FAIT, &proprietes).0;
 
-        // 1. L'erreur hors bande : elle a priorité sur l'identifiant, toujours.
-        if let Some(erreur) = self.sante.derniere_erreur() {
+        // 1. L'erreur de CETTE opération : elle a priorité sur l'identifiant, toujours.
+        if let Some(erreur) = self.sante.erreur_de(operation) {
             return Resultat::AConfirmer {
                 raison: format!("écriture non confirmée par le store : {erreur}"),
             };
         }
-        // 2. La relecture : un identifiant n'est pas une preuve, un fait relu en est une.
-        if self.relire(id).is_none() {
-            return Resultat::AConfirmer {
-                raison: "le fait écrit n'a pas été relu dans le store".to_string(),
-            };
+        // 2. La relecture : un identifiant n'est pas une preuve. On vérifie le TEXTE et le
+        //    PROJET relus, pas seulement la présence d'un nœud à cet identifiant — un store
+        //    qui rend un id sans écrire, ou qui écrit dans un autre projet, doit tomber ici.
+        match self.relire(id) {
+            Some(fait) if fait.texte == texte && fait.projet == projet => {}
+            Some(_) => {
+                return Resultat::AConfirmer {
+                    raison: "le fait relu ne correspond pas à ce qui a été demandé".to_string(),
+                };
+            }
+            None => {
+                return Resultat::AConfirmer {
+                    raison: "le fait écrit n'a pas été relu dans le store".to_string(),
+                };
+            }
         }
         Resultat::Ecrit { id }
     }
 
     /// Applique une correction au fait `id`. La relecture doit montrer le NOUVEAU texte.
-    pub fn reviser(&self, id: u64, texte: &str) -> Resultat {
+    pub fn reviser(&self, projet: &str, id: u64, texte: &str) -> Resultat {
         let texte = texte.trim();
+        let projet = projet.trim();
         if texte.is_empty() {
             return Resultat::Refuse {
                 raison: "refusé : une correction vide n'est pas une correction".to_string(),
             };
         }
-        if self.relire(id).is_none() {
+        if projet.is_empty() {
+            return Resultat::Refuse {
+                raison: "refusé : une correction sans projet n'a pas de périmètre".to_string(),
+            };
+        }
+        // Préserver le projet enregistré ne prouve pas que l'APPELANT y a droit : c'est ici
+        // que le périmètre est vérifié, pas seulement au rappel.
+        let Some(fait) = self.relire(id) else {
             return Resultat::Refuse {
                 raison: format!("refusé : le fait {id} n'existe pas dans le store"),
             };
+        };
+        if fait.projet != projet {
+            return Resultat::Refuse {
+                raison: format!("refusé : le fait {id} n'appartient pas au projet « {projet} »"),
+            };
         }
 
+        let operation = self.operation();
+        self.sante.ouvre(operation);
         let mut proprietes: HashMap<String, Value> = HashMap::new();
         proprietes.insert(PROP_TEXTE.to_string(), Value::from(texte));
         self.stockage
             .update_node(obrain_common::types::NodeId(id), &proprietes);
 
-        if let Some(erreur) = self.sante.derniere_erreur() {
+        if let Some(erreur) = self.sante.erreur_de(operation) {
             return Resultat::AConfirmer {
                 raison: format!("révision non confirmée par le store : {erreur}"),
             };
         }
         match self.relire(id) {
-            Some(fait) if fait.texte == texte => Resultat::Ecrit { id },
+            Some(fait) if fait.texte == texte && fait.projet == projet => Resultat::Ecrit { id },
             Some(_) => Resultat::AConfirmer {
                 raison: "la relecture du fait ne montre pas la correction".to_string(),
             },
@@ -278,6 +336,12 @@ impl Memoire {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                projet: noeud
+                    .properties
+                    .get(PROP_PROJET)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
             })
     }
 }
@@ -285,6 +349,7 @@ impl Memoire {
 /// Ce qu'on relit d'un fait : son texte courant. Rien d'autre n'est nécessaire pour décider.
 struct Fait {
     texte: String,
+    projet: String,
 }
 
 /// Les mots d'un texte : minuscules, alphanumériques, longueur ≥ 3, sans doublon.
@@ -324,6 +389,7 @@ mod tests {
         prochain: AtomicU64,
         nœuds: Mutex<Vec<CognitiveNode>>,
         panne: AtomicBool,
+        falsifie: AtomicBool,
     }
 
     impl StoreFaux {
@@ -332,10 +398,14 @@ mod tests {
                 prochain: AtomicU64::new(1),
                 nœuds: Mutex::new(Vec::new()),
                 panne: AtomicBool::new(false),
+                falsifie: AtomicBool::new(false),
             }
         }
         fn en_panne(&self, panne: bool) {
             self.panne.store(panne, Ordering::Relaxed);
+        }
+        fn falsifie(&self, falsifie: bool) {
+            self.falsifie.store(falsifie, Ordering::Relaxed);
         }
     }
 
@@ -346,10 +416,14 @@ mod tests {
                 // La panne : RIEN n'est écrit, et le trait ne peut pas le dire.
                 return id;
             }
+            let mut ecrites = properties.clone();
+            if self.falsifie.load(Ordering::Relaxed) {
+                ecrites.insert(PROP_TEXTE.to_string(), Value::from("autre chose"));
+            }
             self.nœuds.lock().unwrap().push(CognitiveNode {
                 id,
                 label: label.to_string(),
-                properties: properties.clone(),
+                properties: ecrites,
             });
             id
         }
@@ -384,24 +458,46 @@ mod tests {
         }
     }
 
-    /// Une santé qui relaie la panne du store — ce que ferait l'adaptateur natif.
-    struct SanteDuFaux(Arc<StoreFaux>);
+    /// Une santé qui réserve une place d'erreur PAR OPÉRATION — ce que doit faire l'adaptateur
+    /// natif. Un drapeau global ne satisferait pas ce contrat (voir le test de concurrence).
+    #[derive(Default)]
+    struct SanteParOperation {
+        panne: AtomicBool,
+        ouverts: Mutex<Vec<Operation>>,
+        erreurs: Mutex<HashMap<u64, String>>,
+    }
 
-    impl SanteEcriture for SanteDuFaux {
-        fn derniere_erreur(&self) -> Option<String> {
-            if self.0.panne.load(Ordering::Relaxed) {
-                Some("disque plein".to_string())
-            } else {
-                None
-            }
+    impl SanteParOperation {
+        fn en_panne(&self, panne: bool) {
+            self.panne.store(panne, Ordering::Relaxed);
         }
     }
 
-    fn service() -> (Arc<StoreFaux>, Memoire) {
+    impl SanteEcriture for SanteParOperation {
+        fn ouvre(&self, operation: Operation) {
+            self.ouverts.lock().unwrap().push(operation);
+            if self.panne.load(Ordering::Relaxed) {
+                self.erreurs
+                    .lock()
+                    .unwrap()
+                    .insert(operation.0, "disque plein".to_string());
+            }
+        }
+        fn erreur_de(&self, operation: Operation) -> Option<String> {
+            self.erreurs.lock().unwrap().get(&operation.0).cloned()
+        }
+    }
+
+    fn service_avec_sante() -> (Arc<StoreFaux>, Arc<SanteParOperation>, Memoire) {
         let store = Arc::new(StoreFaux::neuf());
-        let sante: Arc<dyn SanteEcriture> = Arc::new(SanteDuFaux(store.clone()));
+        let sante = Arc::new(SanteParOperation::default());
         let stockage: Arc<dyn CognitiveStorage> = store.clone();
-        let memoire = Memoire::new(stockage, sante);
+        let memoire = Memoire::new(stockage, sante.clone());
+        (store, sante, memoire)
+    }
+
+    fn service() -> (Arc<StoreFaux>, Memoire) {
+        let (store, _sante, memoire) = service_avec_sante();
         (store, memoire)
     }
 
@@ -421,8 +517,9 @@ mod tests {
 
     #[test]
     fn une_ecriture_ratee_n_est_jamais_annoncee_comme_enregistree() {
-        let (store, memoire) = service();
+        let (store, sante, memoire) = service_avec_sante();
         store.en_panne(true);
+        sante.en_panne(true);
         let verdict = memoire.memoriser("this-rs", "un fait qui ne sera pas écrit");
         assert!(
             !verdict.visible(),
@@ -435,6 +532,7 @@ mod tests {
             autre => panic!("attendu AConfirmer, mesuré {autre:?}"),
         }
         store.en_panne(false);
+        sante.en_panne(false);
         assert!(memoire.faits().is_empty(), "la panne n'a rien écrit");
     }
 
@@ -455,7 +553,7 @@ mod tests {
         let Resultat::Ecrit { id } = memoire.memoriser("this-rs", "le port est 8080") else {
             panic!("l'enregistrement doit réussir");
         };
-        let verdict = memoire.reviser(id, "le port est 9090");
+        let verdict = memoire.reviser("this-rs", id, "le port est 9090");
         assert!(verdict.visible(), "{verdict:?}");
 
         let rappels = memoire.rappeler("this-rs", "quel est le port ?", 3);
@@ -469,7 +567,7 @@ mod tests {
     #[test]
     fn reviser_un_fait_absent_est_refuse_et_ne_cree_rien() {
         let (_, memoire) = service();
-        let verdict = memoire.reviser(4242, "un texte");
+        let verdict = memoire.reviser("this-rs", 4242, "un texte");
         assert!(matches!(verdict, Resultat::Refuse { .. }), "{verdict:?}");
         assert!(memoire.faits().is_empty());
     }
@@ -532,10 +630,62 @@ mod tests {
         let Resultat::Ecrit { id } = memoire.memoriser("this-rs", "le port est 8080") else {
             panic!("l'écriture doit réussir");
         };
-        assert!(memoire.reviser(id, "le port est 9090").visible());
+        assert!(memoire.reviser("this-rs", id, "le port est 9090").visible());
         let faits = memoire.faits();
         assert_eq!(faits[0].2, "this-rs", "le fait reste dans son projet");
         assert_eq!(faits[0].1, "le port est 9090");
+    }
+
+    #[test]
+    fn deux_operations_ne_partagent_pas_leur_erreur() {
+        // Une erreur attribuée à l'opération N ne doit pas contaminer l'opération N+1 :
+        // sinon `SanteEcriture` est un drapeau global déguisé, et une écriture saine serait
+        // refusée à tort (ou l'inverse) dès qu'un appel échoue quelque part.
+        let (store, sante, memoire) = service_avec_sante();
+        store.en_panne(true);
+        sante.en_panne(true);
+        let premiere = memoire.memoriser("this-rs", "un fait sous panne");
+        assert!(!premiere.visible(), "{premiere:?}");
+
+        store.en_panne(false);
+        sante.en_panne(false);
+        let seconde = memoire.memoriser("this-rs", "un fait sain");
+        assert!(
+            seconde.visible(),
+            "l'erreur de l'opération précédente ne doit pas coller : {seconde:?}"
+        );
+    }
+
+    #[test]
+    fn une_correction_visant_un_autre_projet_est_refusee() {
+        // Préserver le projet enregistré ne prouve pas que l'APPELANT y a droit.
+        let (_, memoire) = service();
+        let Resultat::Ecrit { id } = memoire.memoriser("this-rs", "le port est 8080") else {
+            panic!("l'écriture doit réussir");
+        };
+        let verdict = memoire.reviser("atelier", id, "le port est 1");
+        assert!(matches!(verdict, Resultat::Refuse { .. }), "{verdict:?}");
+        assert_eq!(
+            memoire.faits()[0].1,
+            "le port est 8080",
+            "rien n'a été corrigé"
+        );
+    }
+
+    #[test]
+    fn une_relecture_qui_ne_correspond_pas_au_texte_n_est_pas_confirmee() {
+        // Un nœud relu au bon identifiant ne suffit pas : si le texte écrit n'est pas celui
+        // demandé, l'écriture n'a pas fait ce qu'on croyait.
+        let (store, memoire) = service();
+        store.falsifie(true);
+        let verdict = memoire.memoriser("this-rs", "le fait que j'ai demandé");
+        assert!(!verdict.visible(), "{verdict:?}");
+        match verdict {
+            Resultat::AConfirmer { raison } => {
+                assert!(raison.contains("ne correspond pas"), "{raison}")
+            }
+            autre => panic!("attendu AConfirmer, mesuré {autre:?}"),
+        }
     }
 
     #[test]
