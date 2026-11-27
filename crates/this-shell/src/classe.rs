@@ -350,6 +350,16 @@ const REGLES: &[Regle] = &[
         base: Classe::Lecture,
         montent: &[],
     },
+    Regle {
+        programme: "sleep",
+        base: Classe::Lecture,
+        montent: &[],
+    },
+    Regle {
+        programme: "printenv",
+        base: Classe::Lecture,
+        montent: &[],
+    },
     // `sed` lit ; `-i` écrit sur place.
     Regle {
         programme: "sed",
