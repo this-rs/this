@@ -20,6 +20,7 @@
 
 pub mod capability;
 pub mod chrome;
+pub mod desktop_consent;
 pub mod device_bridge;
 pub mod form;
 pub mod lifecycle;
