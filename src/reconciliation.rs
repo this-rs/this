@@ -33,6 +33,18 @@
 //! encodées TAGGÉES (Int64 / Float64 / Bytes) : aucune conversion arbitraire vers
 //! Int64.
 //!
+//! # Delta OBRT v2 + verdict_effet (1a6021e9, EXPÉRIMENTAL — non qualifié)
+//! - `ReferenceTentative` est en codec **v2** : elle porte le `domaine_id`
+//!   NATIF (u128, `domaine()`), encodé dans `to_bytes`. Une référence v1
+//!   (legacy) décodée rend `domaine() == 0` (« domaine non spécifié »).
+//! - `EffetResolu` est la SOURCE DE VÉRITÉ unique : `estampille_courante()` et
+//!   `valeur_courante()` sont des ACCESSOIRS dérivés de `etat_courant` (plus
+//!   aucun champ redondant).
+//! - `ResolutionTentative::verdict_effet(i)` est la primitive NATIVE qui
+//!   distingue courant / supplanté / supprimé / indéterminé, sans paramètre
+//!   libre. `VerdictEffet::JamaisEngage` a été SUPPRIMÉ : « jamais engagé »,
+//!   « refusé » et « preuve compactée » sont tous `Indetermine`.
+//!
 //! # Delta collision HLC + état courant (secondaire, 62ecd940 / 6535ddbd / c26824ea)
 //! - Le DOMAINE DE STOCKAGE (`domaine`) est une identité DISTINCTE de l'écrivain
 //!   (`writer_id`), conservée HORS-BANDE : `reconcilier` ne peut PAS la prouver
@@ -46,8 +58,9 @@
 use std::sync::Arc;
 
 use obrain_common::types::{NodeId, Value};
+use obrain_substrate::store::VerdictEffet;
 use obrain_substrate::{
-    EtatPropriete, IntegriteTentative, ReferenceTentative, ResolutionTentative, SubstrateStore,
+    IntegriteTentative, ReferenceTentative, ResolutionTentative, SubstrateStore,
 };
 use this_harness::attribution::{Attribution, RésolutionBackend, Tentative};
 
@@ -457,42 +470,79 @@ pub fn reconcilier(
         IntegriteTentative::Indeterminee => VerdictReconciliation::Indetermine,
         IntegriteTentative::Partielle => VerdictReconciliation::Partielle,
         IntegriteTentative::Integrale => {
-            let tous_canoniques = res
-                .par_cle
-                .iter()
-                .all(|e| e.estampille_courante == Some((enr.ecrivain, reference.horloge())));
-            // Contenu à TROIS états : conforme / incompatible (valeur courante ≠
-            // attendue, sans conversion de type) / illisible (`Absente` /
-            // `Supprimee` / `RessourceInexistante` — PAS une preuve
-            // d'incompatibilité). Une ERREUR de lecture n'apparaît JAMAIS ici :
-            // elle remonte en `Err` via `resoudre_reference` (6535ddbd).
+            // Verdict NATIF par effet : `verdict_effet(i)` (engagement historique
+            // + état courant, SANS paramètre libre ni relecture) distingue
+            // courant / supplanté / supprimé / indéterminé. L'index suit l'ordre
+            // de la référence = ordre des effets attendus (vérifié en étapes 1/5),
+            // retrouvé PAR CLÉ — jamais supposé par position.
+            //
+            // `JamaisEngage` a été SUPPRIMÉ du backend (1a6021e9) : « jamais
+            // engagé », « refusé » et « preuve compactée » sont tous
+            // `Indetermine` — jamais une absence définitive.
             let mut incompatible = false;
             let mut illisible = false;
+            let mut tous_courants = true;
             for (cle, attendu) in &enr.effets_attendus {
-                // Association PAR CLÉ (pas par position).
-                let effet = res.par_cle.iter().find(|e| &e.cle == cle);
-                match effet.map(|e| &e.etat_courant) {
-                    Some(EtatPropriete::Presente { valeur, .. }) => {
-                        if valeur == attendu {
-                            // conforme
-                        } else {
-                            incompatible = true;
+                let Some(i) = res.par_cle.iter().position(|e| &e.cle == cle) else {
+                    // Clé amputée : normalement attrapée par `cles_correspondent`.
+                    illisible = true;
+                    tous_courants = false;
+                    continue;
+                };
+                let effet = &res.par_cle[i];
+                match res.verdict_effet(i) {
+                    VerdictEffet::EngageEtCourant => {
+                        // Engagé ET courant : le contenu doit être conforme.
+                        match effet.valeur_courante() {
+                            Some(valeur) => {
+                                if &valeur != attendu {
+                                    incompatible = true;
+                                }
+                            }
+                            // `EngageEtCourant` sur un tombstone encore debout
+                            // (la tentative EST la suppression) : contenu non
+                            // lisible → indéterminé, jamais confirmé.
+                            None => {
+                                illisible = true;
+                                tous_courants = false;
+                            }
                         }
                     }
-                    // Tombstone, clé jamais écrite, ou nœud mort : le contenu
-                    // courant n'est PAS lisible — ni confirmé, ni incompatible.
-                    Some(EtatPropriete::Supprimee(_))
-                    | Some(EtatPropriete::Absente)
-                    | Some(EtatPropriete::RessourceInexistante)
-                    | None => illisible = true,
+                    VerdictEffet::EngagePuisSupplante => {
+                        // Engagé puis supplanté : masqué, PAS courant. Le contenu
+                        // courant reste lisible (supplanté ≠ supprimé) : s'il
+                        // diffère de l'attendu, c'est une incompatibilité.
+                        tous_courants = false;
+                        match effet.valeur_courante() {
+                            Some(valeur) => {
+                                if &valeur != attendu {
+                                    incompatible = true;
+                                }
+                            }
+                            None => illisible = true,
+                        }
+                    }
+                    VerdictEffet::EngagePuisSupprime => {
+                        // Engagé puis supprimé (tombstone ultérieur) : contenu
+                        // non lisible — ni confirmé, ni incompatible.
+                        tous_courants = false;
+                        illisible = true;
+                    }
+                    VerdictEffet::Indetermine => {
+                        // Indéterminé (jamais engagé, refusé, ou compacté) :
+                        // JAMAIS une absence définitive (JamaisEngage supprimé).
+                        tous_courants = false;
+                        illisible = true;
+                    }
                 }
             }
             if incompatible {
                 VerdictReconciliation::Incompatible
             } else if illisible {
-                // Contenu illisible : ni confirmé, ni incompatible → indéterminé.
+                // Contenu illisible ou indéterminé : ni confirmé, ni
+                // incompatible → indéterminé (jamais « absence définitive »).
                 VerdictReconciliation::Indetermine
-            } else if tous_canoniques {
+            } else if tous_courants {
                 VerdictReconciliation::Confirme
             } else {
                 VerdictReconciliation::EngageMasqueCompatible

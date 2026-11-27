@@ -167,11 +167,12 @@ fn h3_v2_chaine_detecte_cle_amputee() {
     // On repart des octets originaux, on les décode, on reconstruit une référence
     // à [a] seul en réutilisant le codec public (auteur/horloge/cible lisibles).
     let mut ampute = enr.reference_bytes.clone();
-    // En-tête = magic(4) | version(1) | auteur(8) | horloge(8) | cible(8) | n_effets(4).
-    // n_effets (u32 LE) est à l'offset 29..33 ; on le force à 1.
-    ampute[29..33].copy_from_slice(&1u32.to_le_bytes());
-    // On tronque au premier effet : en-tête 33 + len(4) + « a »(1) = 38 octets.
-    ampute.truncate(38);
+    // En-tête v2 = magic(4) | version(1) | auteur(8) | horloge(8) | cible(8) |
+    // domaine(16 BE) | n_effets(4).
+    // n_effets (u32 LE) est à l'offset 45..49 ; on le force à 1.
+    ampute[45..49].copy_from_slice(&1u32.to_le_bytes());
+    // On tronque au premier effet : en-tête 49 + len(4) + « a »(1) = 54 octets.
+    ampute.truncate(54);
     let reference = ReferenceTentative::from_bytes(&ampute).expect("référence amputée bien formée");
 
     // Le stockage la juge Intégrale (L1)…

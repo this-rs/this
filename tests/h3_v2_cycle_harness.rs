@@ -228,7 +228,7 @@ fn h3_v2_engage_puis_masque_n_est_pas_effet_confirme() {
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
     assert_eq!(res.par_cle[0].etat, ResolutionEffet::Engage);
     assert_ne!(
-        res.par_cle[0].estampille_courante,
+        res.par_cle[0].estampille_courante(),
         Some((reference.auteur(), reference.horloge())),
         "l'estampille courante est celle du masque, pas celle de la tentative"
     );
@@ -391,11 +391,11 @@ fn h3_v2_multi_effet_granularite_par_cle() {
     let a = res.par_cle.iter().find(|e| e.cle == "a").expect("clé a");
     let b = res.par_cle.iter().find(|e| e.cle == "b").expect("clé b");
     assert_ne!(
-        a.estampille_courante,
+        a.estampille_courante(),
         Some((reference.auteur(), reference.horloge()))
     );
     assert_eq!(
-        b.estampille_courante,
+        b.estampille_courante(),
         Some((reference.auteur(), reference.horloge()))
     );
     assert!(
