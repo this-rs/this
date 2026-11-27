@@ -68,7 +68,9 @@ fn memoriser_corriger_fermer_rouvrir_rappeler_la_correction() {
     );
 
     // Rappel : la version CORRIGÉE est servie, dans le bon projet.
-    let rappels = memoire.rappeler("alpha", "quel est le port ?", 5);
+    let rappels = memoire
+        .rappeler("alpha", "quel est le port ?", 5)
+        .expect("rappel");
     assert_eq!(rappels.len(), 1, "{rappels:?}");
     assert_eq!(
         rappels[0].texte, "le port est 9090",
@@ -77,13 +79,19 @@ fn memoriser_corriger_fermer_rouvrir_rappeler_la_correction() {
 
     // Le projet B ne peut ni rappeler ni corriger le fait.
     assert!(
-        memoire.rappeler("beta", "quel est le port ?", 5).is_empty(),
+        memoire
+            .rappeler("beta", "quel est le port ?", 5)
+            .expect("rappel beta")
+            .is_empty(),
         "aucun fait n'appartient à beta"
     );
     let verdict = memoire.reviser("beta", id_corrige, "le port est 1");
     assert!(matches!(verdict, Resultat::Refuse { .. }), "{verdict:?}");
     assert_eq!(
-        memoire.rappeler("alpha", "quel est le port ?", 5)[0].texte,
+        memoire
+            .rappeler("alpha", "quel est le port ?", 5)
+            .expect("rappel alpha")[0]
+            .texte,
         "le port est 9090",
         "la correction refusée n'a rien changé"
     );
