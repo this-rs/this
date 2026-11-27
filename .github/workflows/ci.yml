@@ -64,13 +64,38 @@ jobs:
       - name: Did anything other than documentation change?
         id: filter
         run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no base commit to diff against: assume code changed"
+            { echo "code=true"
+              echo "harness=true"
+              echo 'test_legs=[{"rust":"stable","features":"all,wami"},{"rust":"beta","features":"all,wami"},{"rust":"nightly","features":"in-memory,websocket,push,module-signing,oidc,wami"}]'
+              echo 'platforms=["ubuntu-latest","windows-latest","macos-latest"]'
+              echo "swift=true"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" "$GITHUB_SHA" || true)
+          echo "changed files:"; printf '%s\n' "$changed"
+          code=$(printf '%s\n' "$changed" | grep -vE '(\.md$|\.mmd$|^docs/)' | grep -c . || true)
+          echo "code files: $code"
+          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          # Le harnais et ce qu'il tire (this-agent, this-llm) : un changement là peut casser wasm32.
+          if printf '%s\n' "$changed" | grep -qE '^(crates/(this-harness|this-agent|this-llm|this-llm-providers)/|scripts/lint-harness-portability\.rs|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
+          # La durabilité est SENSIBLE À LA PLATEFORME : le `fsync` d'une entrée de
+          # répertoire n'existe qu'en POSIX (`File::open(dossier)` échoue sous Windows).
+          # Un changement de ces fichiers doit donc exercer la matrice complète même sur
+          # une PR SANS l'étiquette `run-full-matrix` — sinon `main` rougit à la fusion
+          # (mesuré sur #390/#391 : 4 témoins Windows rouges passés inaperçus en PR).
+          if printf '%s\n' "$changed" | grep -qE '^(src/(durabilite|autorite_k|harness_seeds)\.rs|tests/(durabilite_primitive|k_allocation_atomique|k_collision_concurrente|raccordement_k_durable)\.rs)$'; then durabilite="true"; else durabilite="false"; fi
+          echo "durabilité modifiée : $durabilite"
           # PARCOURS RAPIDE SUR PR (mesuré le 24/11/2026) : cinq PR ouvertes ensemble
           # ont produit huit runs en file et des runs bloqués quarante minutes, avec
           # ZÉRO échec — le goulot était le nombre de jobs, dont un lanceur macOS rare.
-          # Sur une PR : jambe `stable` seule, ubuntu seul, pas de Swift. Tout revient
-          # sur main/develop/reseau-maille, et sur une PR qui porte `run-full-matrix`.
+          # Sur une PR : jambe `stable` seule, ubuntu seul, pas de Swift — SAUF si la
+          # durabilité a changé. Tout revient sur main/develop/reseau-maille, et sur
+          # une PR qui porte `run-full-matrix`.
           full="${{ contains(github.event.pull_request.labels.*.name, 'run-full-matrix') }}"
-          if [ "${{ github.event_name }}" = "pull_request" ] && [ "$full" != "true" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "$full" != "true" ] && [ "$durabilite" != "true" ]; then
             { echo 'test_legs=[{"rust":"stable","features":"all,wami"}]'
               echo 'platforms=["ubuntu-latest"]'
               echo "swift=false"; } >> "$GITHUB_OUTPUT"
@@ -81,20 +106,7 @@ jobs:
               echo "swift=true"; } >> "$GITHUB_OUTPUT"
             echo "matrice complète"
           fi
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo "no base commit to diff against: assume code changed"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "harness=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$base" "$GITHUB_SHA" || true)
-          echo "changed files:"; printf '%s\n' "$changed"
-          code=$(printf '%s\n' "$changed" | grep -vE '(\.md$|\.mmd$|^docs/)' | grep -c . || true)
-          echo "code files: $code"
-          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-          # Le harnais et ce qu'il tire (this-agent, this-llm) : un changement là peut casser wasm32.
-          if printf '%s\n' "$changed" | grep -qE '^(crates/(this-harness|this-agent|this-llm|this-llm-providers)/|scripts/lint-harness-portability\.rs|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
+
 
   # Test sur plusieurs versions de Rust
   test:
