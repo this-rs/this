@@ -142,6 +142,7 @@ obrain-adapters = { version = "0.0.1", git = "https://github.com/obrain-db/obrai
 # `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
 # recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
 obrain-reactive = { version = "0.0.1", git = "https://github.com/obrain-db/obrain", rev = "b45ad2007ab717c8cf97f97c328fa6985fe01172", optional = true }
+obrain-cognitive = { version = "0.0.1", git = "https://github.com/obrain-db/obrain", rev = "b45ad2007ab717c8cf97f97c328fa6985fe01172", optional = true, default-features = false, features = ["engram"] }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules + guaranteed cache
@@ -239,7 +240,7 @@ obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obra
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
 # moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
-obrain-cognitive = ["obrain"]
+obrain-cognitive = ["obrain", "dep:obrain-cognitive"]
 # vite-rs based SPA frontend hosting (this::server::frontend). Not part of `all`: it keeps
 # the scope of the existing CI jobs. vite-rs is a pinned git dependency (no sibling checkout).
 frontend = ["dep:this-vite"]
