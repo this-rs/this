@@ -1,0 +1,14 @@
+[package]
+name = "this-shell"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The execution contract of a this-rs app: what a command is, what it may touch, and which engine declares itself to run it. Pure: no process, no filesystem, wasm32-safe."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "shell", "exec", "wasm", "contract"]
+categories = ["command-line-interface"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
