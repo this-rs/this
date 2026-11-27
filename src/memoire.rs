@@ -69,10 +69,21 @@ impl SanteEcriture for SansSante {
 }
 
 /// Le verdict d'une écriture. Trois états, jamais deux.
+///
+/// **Ce que chaque verdict PROUVE, et ce qu'il ne prouve pas** — c'est la distinction que le
+/// donneur d'ordre a exigée, et elle change le nom :
+///
+/// - [`Resultat::Ecrit`] : l'écriture a été **relue** dans le store. Cela prouve la
+///   **VISIBILITÉ**. Cela ne prouve NI la durabilité (le store peut ne pas avoir fait son
+///   `fsync`), NI l'engagement au sens OBRR (aucune référence native, aucune réconciliation).
+///   Le nom est `Ecrit` et pas « enregistré » pour cette raison : une confirmation présentée
+///   comme durable doit venir du contrat natif, pas d'une relecture.
+/// - [`Resultat::AConfirmer`] : ni visible, ni perdu. L'indétermination est CONSERVÉE.
+/// - [`Resultat::Refuse`] : rien n'a été tenté, ou la cible n'existe pas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resultat {
-    /// Écrit ET relu : on peut le dire.
-    Enregistre {
+    /// Écrit ET relu — **visibilité**, pas durabilité (voir le doc du type).
+    Ecrit {
         /// L'identifiant du nœud, tel que le store l'a rendu.
         id: u64,
     },
@@ -89,9 +100,12 @@ pub enum Resultat {
 }
 
 impl Resultat {
-    /// Vrai seulement pour `Enregistre`. Une confirmation ne se déduit pas d'un identifiant.
-    pub fn confirme(&self) -> bool {
-        matches!(self, Resultat::Enregistre { .. })
+    /// Vrai seulement pour [`Resultat::Ecrit`]. Un identifiant ne suffit jamais.
+    ///
+    /// Le nom dit « visible », pas « durable » : pour annoncer une durabilité, il faut le
+    /// verdict natif (T3 / OBRR), qui n'est pas rendu par ce service.
+    pub fn visible(&self) -> bool {
+        matches!(self, Resultat::Ecrit { .. })
     }
 }
 
@@ -151,7 +165,7 @@ impl Memoire {
                 raison: "le fait écrit n'a pas été relu dans le store".to_string(),
             };
         }
-        Resultat::Enregistre { id }
+        Resultat::Ecrit { id }
     }
 
     /// Applique une correction au fait `id`. La relecture doit montrer le NOUVEAU texte.
@@ -179,7 +193,7 @@ impl Memoire {
             };
         }
         match self.relire(id) {
-            Some(fait) if fait.texte == texte => Resultat::Enregistre { id },
+            Some(fait) if fait.texte == texte => Resultat::Ecrit { id },
             Some(_) => Resultat::AConfirmer {
                 raison: "la relecture du fait ne montre pas la correction".to_string(),
             },
@@ -189,22 +203,27 @@ impl Memoire {
         }
     }
 
-    /// Rappelle les faits qui recouvrent la question, les mieux classés d'abord.
+    /// Rappelle les faits du projet `projet` qui recouvrent la question, les mieux classés
+    /// d'abord. Un projet vide ne rappelle rien (pas de périmètre implicite).
     ///
     /// **Ce que fait la résolution, et ce qu'elle ne fait pas** : elle est LEXICALE (recouvrement
     /// de mots, mots vides ignorés). Elle ne prétend pas être une recherche sémantique ; elle
     /// est le chemin minimal qui va d'une QUESTION à des INDICES — `recall(&[NodeId], k)` prend
     /// des identifiants, pas du texte, et quelqu'un doit faire ce pont. Le jour où un index
     /// vectoriel est disponible, c'est cette fonction qui change, pas ses appelants.
-    pub fn rappeler(&self, question: &str, k: usize) -> Vec<Rappel> {
+    pub fn rappeler(&self, projet: &str, question: &str, k: usize) -> Vec<Rappel> {
         let mots = mots_de(question);
-        if mots.is_empty() || k == 0 {
+        let projet = projet.trim();
+        // Un projet vide ne rappelle RIEN : ce n'est pas « tous les projets ». Un périmètre
+        // implicite est un élargissement silencieux — exactement ce que ce service refuse.
+        if mots.is_empty() || k == 0 || projet.is_empty() {
             return Vec::new();
         }
         let mut rappels: Vec<Rappel> = self
             .faits()
             .into_iter()
-            .filter_map(|(id, texte)| {
+            .filter(|(_, _, fait_projet)| fait_projet == projet)
+            .filter_map(|(id, texte, _)| {
                 let score = recouvrement(&mots, &mots_de(&texte));
                 if score > 0.0 {
                     Some(Rappel { id, texte, score })
@@ -223,8 +242,8 @@ impl Memoire {
         rappels
     }
 
-    /// Tous les faits du store, `(id, texte)`. Lecture brute : la sélection est ailleurs.
-    pub fn faits(&self) -> Vec<(u64, String)> {
+    /// Tous les faits du store, `(id, texte, projet)`. Lecture brute : la sélection est ailleurs.
+    pub fn faits(&self) -> Vec<(u64, String, String)> {
         self.stockage
             .query_nodes(LABEL_FAIT, None)
             .into_iter()
@@ -234,7 +253,13 @@ impl Memoire {
                     .get(PROP_TEXTE)
                     .and_then(|v| v.as_str())
                     .map(str::to_string)?;
-                Some((noeud.id.0, texte))
+                let projet = noeud
+                    .properties
+                    .get(PROP_PROJET)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                Some((noeud.id.0, texte, projet))
             })
             .collect()
     }
@@ -384,9 +409,14 @@ mod tests {
     fn memoriser_ecrit_relit_et_confirme() {
         let (_, memoire) = service();
         let verdict = memoire.memoriser("this-rs", "le déploiement passe par Caddy");
-        assert!(verdict.confirme(), "{verdict:?}");
+        assert!(verdict.visible(), "{verdict:?}");
         assert_eq!(memoire.faits().len(), 1);
         assert_eq!(memoire.faits()[0].1, "le déploiement passe par Caddy");
+        assert_eq!(
+            memoire.faits()[0].2,
+            "this-rs",
+            "le projet est attaché au fait"
+        );
     }
 
     #[test]
@@ -395,7 +425,7 @@ mod tests {
         store.en_panne(true);
         let verdict = memoire.memoriser("this-rs", "un fait qui ne sera pas écrit");
         assert!(
-            !verdict.confirme(),
+            !verdict.visible(),
             "un identifiant est revenu, mais rien n'est écrit"
         );
         match verdict {
@@ -415,20 +445,20 @@ mod tests {
         store.en_panne(true);
         let memoire_muette = Memoire::new(store.clone(), Arc::new(SansSante));
         let verdict = memoire_muette.memoriser("this-rs", "fait fantôme");
-        assert!(!verdict.confirme(), "{verdict:?}");
+        assert!(!verdict.visible(), "{verdict:?}");
         assert!(memoire.faits().is_empty());
     }
 
     #[test]
     fn reviser_change_la_version_courante_et_le_rappel_sert_la_corrigee() {
         let (_, memoire) = service();
-        let Resultat::Enregistre { id } = memoire.memoriser("this-rs", "le port est 8080") else {
+        let Resultat::Ecrit { id } = memoire.memoriser("this-rs", "le port est 8080") else {
             panic!("l'enregistrement doit réussir");
         };
         let verdict = memoire.reviser(id, "le port est 9090");
-        assert!(verdict.confirme(), "{verdict:?}");
+        assert!(verdict.visible(), "{verdict:?}");
 
-        let rappels = memoire.rappeler("quel est le port ?", 3);
+        let rappels = memoire.rappeler("this-rs", "quel est le port ?", 3);
         assert_eq!(rappels.len(), 1);
         assert_eq!(
             rappels[0].texte, "le port est 9090",
@@ -449,7 +479,7 @@ mod tests {
         let (_, memoire) = service();
         memoire.memoriser("this-rs", "le déploiement passe par Caddy");
         assert!(
-            memoire.rappeler("météo demain", 5).is_empty(),
+            memoire.rappeler("this-rs", "météo demain", 5).is_empty(),
             "aucun rapport, aucun rappel"
         );
     }
@@ -460,13 +490,52 @@ mod tests {
         memoire.memoriser("this-rs", "le déploiement passe par Caddy sur le port 443");
         memoire.memoriser("this-rs", "le déploiement est signé par Developer ID");
         memoire.memoriser("autre", "la recette de la tarte tatin");
-        let rappels = memoire.rappeler("comment se passe le déploiement ?", 5);
+        let rappels = memoire.rappeler("this-rs", "comment se passe le déploiement ?", 5);
         assert_eq!(rappels.len(), 2, "{rappels:?}");
         assert!(rappels.iter().all(|r| r.texte.contains("déploiement")));
         assert!(
             rappels[0].score >= rappels[1].score,
             "le classement est décroissant"
         );
+    }
+
+    #[test]
+    fn deux_projets_avec_des_faits_proches_ne_fuient_pas() {
+        // Le périmètre était ABSENT du rappel : la signature ne le montrait pas, et deux
+        // projets décrivant la même chose se seraient mélangés. C'est le test qui le dit.
+        let (_, memoire) = service();
+        memoire.memoriser("this-rs", "le déploiement passe par Caddy");
+        memoire.memoriser("atelier", "le déploiement passe par Caddy et par la forge");
+
+        let cote_this = memoire.rappeler("this-rs", "le déploiement passe par quoi ?", 5);
+        let cote_atelier = memoire.rappeler("atelier", "le déploiement passe par quoi ?", 5);
+
+        assert_eq!(cote_this.len(), 1, "{cote_this:?}");
+        assert_eq!(cote_atelier.len(), 1, "{cote_atelier:?}");
+        assert!(cote_this[0].texte.contains("Caddy") && !cote_this[0].texte.contains("forge"));
+        assert!(cote_atelier[0].texte.contains("forge"));
+    }
+
+    #[test]
+    fn un_projet_vide_ne_rappelle_rien_pas_tous_les_projets() {
+        let (_, memoire) = service();
+        memoire.memoriser("this-rs", "le déploiement passe par Caddy");
+        assert!(
+            memoire.rappeler("", "le déploiement", 5).is_empty(),
+            "un périmètre vide ne doit pas devenir « tous les projets »"
+        );
+    }
+
+    #[test]
+    fn une_correction_ne_change_pas_le_projet_du_fait() {
+        let (_, memoire) = service();
+        let Resultat::Ecrit { id } = memoire.memoriser("this-rs", "le port est 8080") else {
+            panic!("l'écriture doit réussir");
+        };
+        assert!(memoire.reviser(id, "le port est 9090").visible());
+        let faits = memoire.faits();
+        assert_eq!(faits[0].2, "this-rs", "le fait reste dans son projet");
+        assert_eq!(faits[0].1, "le port est 9090");
     }
 
     #[test]
