@@ -215,6 +215,10 @@ websocket = []
 # Couche objets (S3/MinIO/local via object_store), isolée par tenant. Indépendante des backends d'entités.
 objects = ["dep:object_store", "dep:bytes"]
 objects-toolbox = ["objects", "dep:this-harness"]
+# L'autorité K durable (`autorite_k`) exposée comme `Seeds` du harnais (routage).
+# Ne tire QUE `this-harness` — ni `obrain`, ni `objects` : c'est le raccordement
+# de l'identification des décisions SANS attendre les contrats natifs OBRR.
+harness-seeds = ["dep:this-harness"]
 # URLs présignées (S3/Azure/GCP) : ajoute reqwest 0.13, aligné sur object_store 0.14.
 presign = ["objects", "dep:reqwest"]
 # Bucket S3/MinIO : ajoute le backend AWS d'object_store (AmazonS3).
