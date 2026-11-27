@@ -72,17 +72,15 @@ fn apres_close_la_reouverture_est_permise_meme_avec_un_ancien_handle_conserve() 
 }
 
 #[test]
-fn le_flux_de_fermeture_avale_l_erreur_de_flush() {
-    // Ce que l'ADAPTATEUR ne doit pas confondre : `ObrainDB::close()` avale
-    // l'erreur de `sub.flush()` et rend `Ok(())`. Ce test ne provoque pas un
-    // flush défaillant (non reproductible sans injection) : il VERROUILLE le
-    // contrat lu dans le code (`database/mod.rs`, `close`), en le documentant
-    // comme tel — « relu, pas mesuré ».
+fn commit_wal_est_accessible_et_rend_ok_sur_un_store_sain() {
+    // Ce test ne provoque AUCUNE erreur : il vérifie que `commit_wal()` est
+    // accessible depuis le consommateur et rend Ok sur un store sain.
     //
-    // La conséquence pour le consommateur : un `close()` qui rend `Ok(())` n'est
-    // PAS une preuve de durabilité du dernier flush. La garantie de durabilité
-    // s'obtient par `commit_wal()` (qui, lui, rend l'erreur de flush), pas par
-    // `close()`.
+    // Le défaut de propagation de flush de `ObrainDB::close()` (il AVALE
+    // l'erreur de `sub.flush()` et rend `Ok(())`) reste un constat
+    // d'INSPECTION (`database/mod.rs`, `close`), pas une mesure : le reproduire
+    // exigerait une injection de panne de flush, qui n'existe pas. La garantie
+    // de durabilité s'obtient par `commit_wal()`, qui rend l'erreur de flush.
     let chemin = repertoire();
     std::fs::create_dir_all(&chemin).expect("répertoire de test");
     let db = ObrainDB::open(&chemin).expect("ouverture");

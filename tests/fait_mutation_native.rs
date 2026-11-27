@@ -55,7 +55,8 @@ fn le_fait_est_ecrit_puis_corrige_avec_la_reference_de_sa_mutation() {
     let db = ObrainDB::open(&chemin).expect("open");
     let store = db.substrate_handle().expect("substrate handle");
 
-    let cible = store.create_node(&["_fait"]);
+    // Le label doit rester aligné sur `this::memoire::LABEL_FAIT`.
+    let cible = store.create_node(&[":Fait"]);
 
     // ── création du fait : texte + projet, précondition déclare les deux ──
     let pre = store
@@ -106,7 +107,21 @@ fn le_fait_est_ecrit_puis_corrige_avec_la_reference_de_sa_mutation() {
     assert_eq!(texte_de(&store, cible), "déploiement prévu jeudi");
     assert_eq!(projet_de(&store, cible), "alpha"); // projet conservé
 
-    let _ = reference_correction;
+    // La correction est résolue ELLE AUSSI : une seule clé écrite, intégrale.
+    let resolution_correction = store
+        .resoudre_reference(&reference_correction)
+        .expect("résoudre correction");
+    assert_eq!(
+        resolution_correction.nb_effets(),
+        1,
+        "seul `texte` est écrit"
+    );
+    assert_eq!(
+        resolution_correction.integrite(),
+        obrain_substrate::IntegriteTentative::Integrale,
+        "l'effet de correction est engagé"
+    );
+
     db.close().expect("close");
     let _ = std::fs::remove_dir_all(&chemin);
 }
