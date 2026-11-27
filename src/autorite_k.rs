@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 // La primitive de durabilité est extraite dans `crate::durabilite` : elle ne dépend
 // pas d'Obrain, contrairement au reste de `reconciliation` (codec OBRR +
 // réconciliation), qui exige un contrat natif absent du pin `7a795370`.
-use crate::durabilite::ecrire_durable;
+use crate::durabilite::{ResultatEcriture, ecrire_durable};
 
 /// Taille de l'état durable : un u128 little-endian (16 octets).
 const TAILLE_ETAT: usize = 16;
@@ -116,6 +116,28 @@ fn erreur_invalide(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// Convertit un [`ResultatEcriture`] en `Ok(())` SEULEMENT pour une publication
+/// DURABLE qualifiée. Toute garantie moindre est un refus NOMMÉ — jamais une
+/// confirmation d'allocation durable sur une garantie insuffisante, jamais une
+/// confusion entre « erreur après renommage » (publication EFFECTUÉE) et
+/// « absence de publication ».
+fn exiger_durable(resultat: ResultatEcriture, contexte: &str) -> io::Result<()> {
+    match resultat {
+        ResultatEcriture::PublicationDurable => Ok(()),
+        ResultatEcriture::EchecAvantPublication { cause } => Err(erreur_invalide(format!(
+            "{contexte} : échec AVANT publication (état inchangé) — {cause}"
+        ))),
+        ResultatEcriture::PublicationDurabiliteIndeterminee { cause } => {
+            Err(erreur_invalide(format!(
+                "{contexte} : publication EFFECTUÉE mais durabilité INDÉTERMINÉE — allocation durable REFUSÉE (valeur brûlée, jamais réattribuée) — {cause}"
+            )))
+        }
+        ResultatEcriture::GarantieIndisponible { plateforme } => Err(erreur_invalide(format!(
+            "{contexte} : garantie de durabilité INDISPONIBLE ({plateforme}) — allocation durable REFUSÉE"
+        ))),
+    }
+}
+
 fn chemin_verrou(chemin: &Path) -> PathBuf {
     let mut nom = chemin.as_os_str().to_os_string();
     nom.push(SUFFIXE_VERROU);
@@ -168,8 +190,14 @@ impl AutoriteK {
         let prochain = match lire_etat(&ak.chemin)? {
             Some(valeur) => valeur,
             None => {
-                // Création initiale durable : 1 (0 = « jamais émise »).
-                ecrire_durable(&ak.chemin, &1u128.to_le_bytes())?;
+                // Création initiale durable : 1 (0 = « jamais émise »). Sur une
+                // garantie insuffisante (durabilité indéterminée ou indisponible),
+                // l'ouverture est REFUSÉE nommément — jamais une autorité
+                // silencieusement non durable.
+                exiger_durable(
+                    ecrire_durable(&ak.chemin, &1u128.to_le_bytes()),
+                    "création initiale de l'état K",
+                )?;
                 1
             }
         };
@@ -220,8 +248,12 @@ impl AutoriteK {
         })?;
 
         // PERSISTANCE AVANT PUBLICATION : si le processus meurt ici, `lu` est
-        // brûlé — jamais réattribué.
-        ecrire_durable(&self.chemin, &suivant.to_le_bytes())?;
+        // brûlé — jamais réattribué. `lu` n'est publié QUE sur une durabilité
+        // QUALIFIÉE ; sinon l'allocation est REFUSÉE nommément (valeur brûlée).
+        exiger_durable(
+            ecrire_durable(&self.chemin, &suivant.to_le_bytes()),
+            &format!("persistance de K (suivant {suivant})"),
+        )?;
         observe(EtapeEmission::SuivantPersiste(suivant));
 
         self.prochain = suivant;
@@ -279,6 +311,7 @@ mod tests {
         d
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn compteur_u128_durable_et_monotone() {
         let d = dir("durabilite");
@@ -302,6 +335,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn corruption_refusee_pas_de_reinitialisation_silencieuse() {
         let d = dir("corruption");
@@ -319,6 +353,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn deux_instances_meme_processus_n_emettent_jamais_le_meme_k() {
         let d = dir("instances");
@@ -338,6 +373,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn ordre_mesure_verrou_puis_lecture_puis_persistance_puis_publication() {
         let d = dir("ordre");
@@ -394,6 +430,28 @@ mod tests {
         let mut b = [0u8; TAILLE_ETAT];
         b.copy_from_slice(&octets);
         assert_eq!(u128::from_le_bytes(b), u128::MAX, "état inchangé");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Sous Windows, la durabilité de l'entrée de répertoire est INDISPONIBLE via
+    /// `std::fs` : la création d'un domaine neuf est REFUSÉE nommément (pas un
+    /// `PermissionDenied` brut), jamais confirmée comme durable.
+    #[cfg(windows)]
+    #[test]
+    fn garantie_indisponible_refusee_nommement_sous_windows() {
+        let d = dir("win");
+        let chemin = d.join("autorite.k");
+        let err = AutoriteK::ouvrir(chemin).expect_err("refus attendu sous Windows");
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("indisponible"),
+            "refus nommé d'une garantie indisponible : {message}"
+        );
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "refus = InvalidData (nommé), pas un PermissionDenied brut"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

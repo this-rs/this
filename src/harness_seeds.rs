@@ -68,12 +68,16 @@ impl SeedsDurables {
 impl this_harness::routing::Seeds for SeedsDurables {
     fn next_id(&self) -> u128 {
         // Le trait `Seeds` n'offre aucun canal d'erreur : un état K corrompu, nul,
-        // disparu sous verrou, RÉGRESSÉ ou saturé est un refus NOMMÉ (panique),
-        // jamais une réinitialisation silencieuse ni un repli sur un K faux.
+        // disparu sous verrou, RÉGRESSÉ, saturé, ou une durabilité NON QUALIFIÉE
+        // (indéterminée / indisponible sur la plateforme) est un refus NOMMÉ
+        // (panique) — jamais une réattribution silencieuse de K, jamais un repli
+        // sur une suite en mémoire (`SequenceSeeds`).
         self.autorite
             .lock()
             .expect("autorité K : verrou empoisonné")
             .emettre()
-            .expect("autorité K : refus nommé (corruption, saturation, régression)")
+            .expect(
+                "autorité K : refus nommé (corruption, saturation, régression, durabilité non qualifiée)",
+            )
     }
 }

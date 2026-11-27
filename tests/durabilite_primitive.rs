@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use this::durabilite::{
-    EtapeEcriture, ecrire_durable, ecrire_durable_observe, temporaires_orphelins,
+    EtapeEcriture, ResultatEcriture, ecrire_durable, ecrire_durable_observe, temporaires_orphelins,
 };
 
 fn dir(tag: &str) -> PathBuf {
@@ -43,7 +43,12 @@ fn ecriture_durable_ordre_observe() {
     let octets: Vec<u8> = (0u8..32).collect();
 
     let mut etapes: Vec<EtapeEcriture> = Vec::new();
-    ecrire_durable_observe(&chemin, &octets, &mut |e| etapes.push(e)).expect("écriture durable");
+    let resultat = ecrire_durable_observe(&chemin, &octets, &mut |e| etapes.push(e));
+    assert_eq!(
+        resultat,
+        ResultatEcriture::PublicationDurable,
+        "sur POSIX, une écriture complète est DURABLE (fsync fichier + répertoire)"
+    );
 
     assert_eq!(
         etapes,
@@ -79,9 +84,17 @@ fn ecriture_durable_ordre_observe() {
 fn la_seconde_ecriture_remplace() {
     let d = dir("remplace");
     let chemin = d.join("etat.k");
-    ecrire_durable(&chemin, b"premier").expect("écriture 1");
+    assert_eq!(
+        ecrire_durable(&chemin, b"premier"),
+        ResultatEcriture::PublicationDurable,
+        "écriture 1 durable"
+    );
     assert_eq!(std::fs::read(&chemin).expect("lecture 1"), b"premier");
-    ecrire_durable(&chemin, b"second-plus-long").expect("écriture 2");
+    assert_eq!(
+        ecrire_durable(&chemin, b"second-plus-long"),
+        ResultatEcriture::PublicationDurable,
+        "écriture 2 durable"
+    );
     assert_eq!(
         std::fs::read(&chemin).expect("lecture 2"),
         b"second-plus-long",
@@ -110,5 +123,46 @@ fn temporaire_orphelin_constate_jamais_promu() {
         "aucun fichier publié : un temporaire n'est jamais promu par le balayage"
     );
 
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Un échec AVANT publication ne publie RIEN : le résultat est
+/// `EchecAvantPublication`, distinct d'une publication à durabilité réduite.
+#[test]
+fn echec_avant_publication_ne_publie_rien() {
+    let d = dir("echec-avant");
+    let inexistant = d.join("absent").join("etat.k");
+    let resultat = ecrire_durable(&inexistant, b"x");
+    match resultat {
+        ResultatEcriture::EchecAvantPublication { cause } => {
+            assert!(!cause.is_empty(), "cause nommée");
+        }
+        autre => panic!("attendu un échec AVANT publication, obtenu : {autre:?}"),
+    }
+    assert!(
+        !inexistant.exists(),
+        "aucune publication : le fichier n'existe pas"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Sous Windows, la durabilité d'entrée de répertoire est INDISPONIBLE via
+/// `std::fs` : `ecrire_durable` PUBLIE le contenu (le `rename` réussit) mais le
+/// RÉSULTAT encode `GarantieIndisponible` — jamais une durabilité présumée, et
+/// jamais confondu avec un échec avant publication.
+#[cfg(windows)]
+#[test]
+fn windows_garantie_indisponible_representee_dans_le_resultat() {
+    let d = dir("win");
+    let chemin = d.join("etat.k");
+    let resultat = ecrire_durable(&chemin, b"contenu");
+    match resultat {
+        ResultatEcriture::GarantieIndisponible { plateforme } => {
+            assert!(plateforme.to_lowercase().contains("windows"));
+        }
+        autre => panic!("attendu GarantieIndisponible sous Windows, obtenu : {autre:?}"),
+    }
+    // La publication a EU LIEU (le rename a réussi) : le contenu est lisible.
+    assert_eq!(std::fs::read(&chemin).expect("lecture"), b"contenu");
     let _ = std::fs::remove_dir_all(&d);
 }
