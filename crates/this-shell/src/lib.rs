@@ -69,10 +69,12 @@ use async_trait::async_trait;
 
 pub mod classe;
 pub mod conformance;
+pub mod niveau;
 
 pub use classe::{
     Borne, Classe, Commande, Moteur, Refus, Sortie, classe_de_chemin, classe_effective, classer,
 };
+pub use niveau::{Droits, Etendue, Niveau};
 
 /// Le port d'exécution. L'hôte en fournit une implémentation par moteur disponible.
 ///
