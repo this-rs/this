@@ -67,6 +67,14 @@ pub mod core;
 /// C'est la garantie de persistance dont dépend [`autorite_k`] ; le format OBRR
 /// qui l'utilisait aussi n'est PAS porté (récupération indisponible sur ce pin).
 pub mod durabilite;
+/// Raccordement de l'autorité K durable au port [`this_harness::routing::Seeds`]
+/// du harnais : l'identité de chaque décision (`decision_id`) est allouée par
+/// [`autorite_k`] (u128, atomique, durable) au lieu d'une suite en mémoire.
+///
+/// Gaté derrière `harness-seeds` (qui ne tire que `this-harness`) : le
+/// raccordement n'exige aucun contrat Obrain.
+#[cfg(feature = "harness-seeds")]
+pub mod harness_seeds;
 /// Module descriptor (crate `this-descriptor`): types, pure engines, error table. Shared
 /// with this-cli and wasm32 fronts. See `docs/rfc/module-descriptor.md`.
 pub use this_descriptor as descriptor;
