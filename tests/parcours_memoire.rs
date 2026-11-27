@@ -1,10 +1,12 @@
 //! Le parcours mémoire par le SERVICE et l'ADAPTATEUR de production, sur une vraie base,
-//! en deux « processus » : fermeture propre puis réouverture.
+//! avec FERMETURE puis RÉOUVERTURE DANS LE MÊME PROCESSUS — pas deux processus : la
+//! référence de reprise reste dans une variable en mémoire.
+//!
+//! Le vrai parcours à DEUX PROCESSUS (référence sérialisée via le codec natif dans un
+//! fichier, deux binaires lancés par le parent) est dans `tests/parcours_deux_processus.rs`.
 //!
 //! Ce témoin prouve la survie à une fin de processus PROPRE (fermeture + réouverture). Il ne
-//! simule PAS une coupure de courant, et ne qualifie PAS la reprise après réponse perdue : la
-//! référence de reprise est conservée dans une variable par l'appelant, ce qui démontre la
-//! résolution après réouverture mais pas la persistance de la référence elle-même.
+//! simule PAS une coupure de courant, et ne qualifie PAS la reprise après réponse perdue.
 #![cfg(feature = "obrain-cognitive")]
 
 use std::path::PathBuf;

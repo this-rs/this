@@ -292,7 +292,14 @@ impl StockageFait for AdaptateurNatif {
             .into_iter()
             .map(|id| match self.lire(id.0)? {
                 Some((t, p)) => Ok((id.0, t, p)),
-                None => Ok((id.0, String::new(), String::new())),
+                None => Err(ErreurStockage::AConfirmer {
+                    raison: format!(
+                        "le nœud {} est listé sous :Fait mais sa ressource a disparu",
+                        id.0
+                    ),
+                    id: Some(id.0),
+                    reference: None,
+                }),
             })
             .collect()
     }
@@ -306,7 +313,7 @@ impl StockageFait for AdaptateurNatif {
             .map_err(|e| ErreurStockage::AConfirmer {
                 raison: format!("résolution : {e}"),
                 id: None,
-                reference: None,
+                reference: Some(reference.clone()),
             })
     }
 }
