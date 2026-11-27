@@ -29,15 +29,15 @@
 //!
 //! `ecrire_durable` ne retourne pas `io::Result<()>`. Une erreur APRÈS le
 //! `rename` n'est PAS une absence de publication : la traiter comme telle
-//! mentirait au consommateur. Elle retourne [`ResultatEcriture`], qui encode le
+//! mentirait au consommateur. Elle retourne [`crate::durabilite::ResultatEcriture`], qui encode le
 //! niveau de garantie RÉELLEMENT obtenu :
 //!
 //! | état | publication | durabilité |
 //! |---|---|---|
-//! | [`ResultatEcriture::EchecAvantPublication`] | NON | — (rien à durabiliser) |
-//! | [`ResultatEcriture::PublicationDurable`] | OUI | QUALIFIÉE (`fsync` fichier + répertoire, POSIX) |
-//! | [`ResultatEcriture::PublicationDurabiliteIndeterminee`] | OUI | INDÉTERMINÉE (`fsync` répertoire a échoué) |
-//! | [`ResultatEcriture::GarantieIndisponible`] | OUI | INDISPONIBLE (primitive absente de la plateforme) |
+//! | [`crate::durabilite::ResultatEcriture::EchecAvantPublication`] | NON | — (rien à durabiliser) |
+//! | [`crate::durabilite::ResultatEcriture::PublicationDurable`] | OUI | QUALIFIÉE (`fsync` fichier + répertoire, POSIX) |
+//! | [`crate::durabilite::ResultatEcriture::PublicationDurabiliteIndeterminee`] | OUI | INDÉTERMINÉE (`fsync` répertoire a échoué) |
+//! | [`crate::durabilite::ResultatEcriture::GarantieIndisponible`] | OUI | INDISPONIBLE (primitive absente de la plateforme) |
 //!
 //! ## La durabilité d'entrée de répertoire sous Windows — garanties DOCUMENTÉES
 //!
@@ -64,7 +64,7 @@
 //!
 //! Aucune de ces trois primitives ne fournit l'équivalent DOCUMENTÉ du `fsync`
 //! de répertoire POSIX pour un `rename` atomique même volume. Ce module ne le
-//! PRÉSUME pas : sous Windows il retourne [`ResultatEcriture::GarantieIndisponible`],
+//! PRÉSUME pas : sous Windows il retourne [`crate::durabilite::ResultatEcriture::GarantieIndisponible`],
 //! et c'est au consommateur ([`crate::autorite_k`]) de REFUSER de confirmer une
 //! allocation durable sur cette garantie insuffisante — jamais de réattribution
 //! silencieuse.
