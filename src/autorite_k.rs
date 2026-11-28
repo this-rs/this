@@ -262,6 +262,65 @@ impl AutoriteK {
         Ok(lu)
     }
 
+    /// Réserve `n` K pour `n` nouvelles opérations en UNE SEULE écriture durable :
+    /// verrou, lecture sous verrou, contrôle de régression, contrôle de
+    /// saturation, UNE `ecrire_durable` du compteur avancé de `n`, puis
+    /// publication des `n` K consécutifs.
+    ///
+    /// C'est exactement la discipline de [`AutoriteK::emettre_observe`] (même
+    /// ordre : verrou → lecture sous verrou → non-régression → non-saturation →
+    /// persistance AVANT publication → publication), appliquée à un BLOC au lieu
+    /// d'un K : là où `emettre` fait une écriture durable par K (donc `n` fsync
+    /// fichier + `n` fsync répertoire pour `n` K), `reserver` n'en fait qu'UNE
+    /// pour les `n` K. Un bloc de 256 ne coûte donc qu'une seule persistance,
+    /// pas 256.
+    ///
+    /// `n == 0` rend un bloc vide SANS toucher à l'état (ce n'est pas une
+    /// réservation). La saturation est refusée dès que `lu + n` dépasserait le
+    /// dernier `u128` admissible : l'état n'est ni bouclé ni réinitialisé.
+    pub fn reserver(&mut self, n: u32) -> io::Result<Vec<u128>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let _v = self.verrouiller()?;
+
+        // La lecture est faite ICI, sous verrou — pas à l'ouverture.
+        let lu = lire_etat(&self.chemin)?.ok_or_else(|| {
+            erreur_invalide(
+                "état K disparu sous verrou : aucune réinitialisation silencieuse".to_string(),
+            )
+        })?;
+
+        // Un compteur qui RECULE sous nos pieds est un état restauré : refuser
+        // plutôt que réattribuer un K déjà émis.
+        if let Some(dernier) = self.dernier_emis
+            && lu <= dernier
+        {
+            return Err(erreur_invalide(format!(
+                "compteur K régressé : état durable {lu} ≤ dernier K émis {dernier} — \
+                 réutilisation refusée (restauration du fichier ?)"
+            )));
+        }
+
+        let suivant = lu.checked_add(n as u128).ok_or_else(|| {
+            io::Error::other(format!(
+                "saturation du compteur K (u128) : {lu} + {n} dépasse le dernier K admissible"
+            ))
+        })?;
+
+        // UNE SEULE écriture durable pour le bloc : si le processus meurt ici,
+        // `lu..suivant` est brûlé — jamais réattribué. Aucun K du bloc n'est rendu
+        // QUE sur une durabilité QUALIFIÉE.
+        exiger_durable(
+            ecrire_durable(&self.chemin, &suivant.to_le_bytes()),
+            &format!("persistance de K (bloc de {n}, suivant {suivant})"),
+        )?;
+
+        self.prochain = suivant;
+        self.dernier_emis = Some(suivant - 1);
+        Ok((lu..suivant).collect())
+    }
+
     /// Vue CACHÉE du prochain K, rafraîchie à la dernière opération faite SOUS
     /// verrou par cette instance. Ce n'est pas une lecture concurrente : pour
     /// l'état réel, voir [`AutoriteK::prochain_durable`].
@@ -332,6 +391,69 @@ mod tests {
         assert_ne!(k2, k0);
         assert_ne!(k2, k1);
 
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reserver_un_bloc_en_une_seule_ecriture_durable() {
+        let d = dir("bloc");
+        let chemin = d.join("autorite.k");
+        let mut ak = AutoriteK::ouvrir(chemin.clone()).expect("ouverture");
+        let bloc = ak.reserver(3).expect("réservation de 3");
+        assert_eq!(
+            bloc,
+            vec![1, 2, 3],
+            "trois K consécutifs depuis une autorité fraîche"
+        );
+        assert_eq!(ak.prochain(), 4, "vue avancée de 3 après le bloc");
+        assert_eq!(
+            ak.prochain_durable().expect("état"),
+            4,
+            "persisté durablement"
+        );
+
+        // Non-régression / non-réutilisation : réouverture sur le MÊME fichier.
+        let mut relu = AutoriteK::ouvrir(chemin.clone()).expect("réouverture");
+        assert_eq!(relu.prochain(), 4, "compteur restauré, jamais réinventé");
+        let suite = relu.reserver(2).expect("second bloc");
+        assert_eq!(suite, vec![4, 5], "aucun K réattribué");
+        assert!(
+            suite.iter().all(|k| !bloc.contains(k)),
+            "les blocs sont disjoints : {bloc:?} puis {suite:?}"
+        );
+
+        // Un bloc vide ne touche pas à l'état.
+        let avant = relu.prochain_durable().expect("état");
+        assert!(relu.reserver(0).expect("bloc vide").is_empty());
+        assert_eq!(
+            relu.prochain_durable().expect("état"),
+            avant,
+            "n == 0 : état inchangé"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reserver_un_bloc_sature_est_refuse_sans_repli() {
+        let d = dir("bloc_saturation");
+        std::fs::create_dir_all(&d).expect("répertoire");
+        let chemin = d.join("autorite.k");
+        // `lu = u128::MAX - 1` : un bloc de 2 donnerait `suivant = u128::MAX + 1`.
+        std::fs::write(&chemin, (u128::MAX - 1).to_le_bytes()).expect("état quasi saturé");
+        let mut ak = AutoriteK::ouvrir(chemin.clone()).expect("ouverture");
+        let err = ak.reserver(2).expect_err("saturation refusée");
+        assert!(
+            err.to_string().contains("saturation"),
+            "refus nommé : {err}"
+        );
+        // Aucun repli : l'état n'a ni bouclé à 0, ni été réinitialisé à 1.
+        let octets = std::fs::read(&chemin).expect("état");
+        let mut b = [0u8; TAILLE_ETAT];
+        b.copy_from_slice(&octets);
+        assert_eq!(u128::from_le_bytes(b), u128::MAX - 1, "état inchangé");
         let _ = std::fs::remove_dir_all(&d);
     }
 
