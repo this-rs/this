@@ -919,6 +919,7 @@ jobs:
             --test parcours_memoire \
             --test parcours_deux_processus \
             --test reprise_memoire \
+            --test lire_non_conforme \
             --test ledger_natif_exporte \
             -- --test-threads=1
 
