@@ -27,10 +27,12 @@ use std::sync::Arc;
 
 use obrain_common::types::{NodeId, Value};
 use obrain_core::graph::traits::{GraphStore, GraphStoreMut};
-use obrain_substrate::{
-    EtatPropriete, IntegriteTentative, IssuePublication, ModePublication, ReferenceTentative,
-    ResolutionTentative, SubstrateStore,
-};
+use obrain_substrate::{EtatPropriete, IssuePublication, ModePublication, SubstrateStore};
+
+// Réexport public : le CONSOMMATEUR (Atelier) a besoin de nommer ces types pour décoder
+// une référence native (`from_bytes`) et résoudre après réouverture, sans dépendre
+// d'`obrain-substrate` directement. La même identité de dépendance Obrain est conservée.
+pub use obrain_substrate::{IntegriteTentative, ReferenceTentative, ResolutionTentative};
 
 /// Le label des faits mémorisés.
 pub const LABEL_FAIT: &str = ":Fait";
