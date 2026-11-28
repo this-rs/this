@@ -278,10 +278,26 @@ impl StockageFait for AdaptateurNatif {
                 id: Some(id),
                 reference: None,
             })? {
-            EtatPropriete::Presente { valeur, .. } => {
-                valeur.as_str().unwrap_or_default().to_string()
+            EtatPropriete::Presente { valeur, .. } => match valeur.as_str() {
+                Some(s) => s.to_string(),
+                None => {
+                    return Err(ErreurStockage::AConfirmer {
+                        raison: format!("le fait {id} porte un `projet` non textuel"),
+                        id: Some(id),
+                        reference: None,
+                    });
+                }
+            },
+            // `texte` est présent (lu plus haut) mais `projet` absent : fait non conforme.
+            EtatPropriete::RessourceInexistante
+            | EtatPropriete::Absente
+            | EtatPropriete::Supprimee(_) => {
+                return Err(ErreurStockage::AConfirmer {
+                    raison: format!("le fait {id} a un `texte` mais pas de `projet`"),
+                    id: Some(id),
+                    reference: None,
+                });
             }
-            _ => String::new(),
         };
         Ok(Some((texte, projet)))
     }
@@ -434,7 +450,10 @@ impl Memoire {
             Err(ErreurStockage::AConfirmer { raison, .. }) => {
                 Self::a_confirmer(raison, Some(publie.id), publie.reference)
             }
-            Err(ErreurStockage::Refus(raison)) => Resultat::Refuse { raison },
+            // Une mutation a déjà été tentée : un refus en relecture n'efface pas le contexte.
+            Err(ErreurStockage::Refus(raison)) => {
+                Self::a_confirmer(raison, Some(publie.id), publie.reference)
+            }
         }
     }
 
@@ -484,7 +503,9 @@ impl Memoire {
             Err(ErreurStockage::AConfirmer { raison, .. }) => {
                 Self::a_confirmer(raison, Some(id), publie.reference)
             }
-            Err(ErreurStockage::Refus(raison)) => Resultat::Refuse { raison },
+            Err(ErreurStockage::Refus(raison)) => {
+                Self::a_confirmer(raison, Some(id), publie.reference)
+            }
         }
     }
 
